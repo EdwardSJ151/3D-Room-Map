@@ -1,0 +1,7 @@
+__pycache__/
+.env
+.adk
+Untitled*
+*.pkl
+*.index
+test.py
