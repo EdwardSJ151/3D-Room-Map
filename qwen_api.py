@@ -30,7 +30,8 @@ VLLM_MODEL      = os.environ.get("VLLM_MODEL", "MY_MODEL")
 MAX_NEW_TOKENS  = int(os.environ.get("QWEN_MAX_NEW_TOKENS", "256"))
 CONCURRENCY     = int(os.environ.get("QWEN_CONCURRENCY", "16"))
 REQUEST_TIMEOUT = float(os.environ.get("QWEN_TIMEOUT_S", "20.0"))
-EMBED_MODEL_ID  = os.environ.get("QWEN_EMBED_MODEL", "Qwen/Qwen3-Embedding-0.6B")
+EMBED_MODEL_ID     = os.environ.get("QWEN_EMBED_MODEL", "Qwen/Qwen3-Embedding-0.6B")
+EMBED_DEVICE       = os.environ.get("QWEN_EMBED_DEVICE", "cpu")   # "cpu" or "cuda"
 
 JOBS_DIR = Path(os.environ.get("QWEN_JOBS_DIR", "qwen_jobs"))
 JOBS_DIR.mkdir(parents=True, exist_ok=True)
@@ -104,8 +105,8 @@ def _get_embed_model():
                 from sentence_transformers import SentenceTransformer
                 _embed_model = SentenceTransformer(
                     EMBED_MODEL_ID,
-                    device="cuda" if torch.cuda.is_available() else "cpu",
-                    model_kwargs={"torch_dtype": torch.float16} if torch.cuda.is_available() else {},
+                    device=EMBED_DEVICE,
+                    model_kwargs={"torch_dtype": torch.float16} if EMBED_DEVICE == "cuda" else {},
                     tokenizer_kwargs={"padding_side": "left"},
                 )
     return _embed_model
@@ -355,7 +356,7 @@ app = FastAPI(title="Qwen Recognition + Vectorstore API")
 def _preload_embed_model():
     # Force the SentenceTransformer onto GPU before serving requests so the
     # first /qwen/query call doesn't pay the load cost.
-    print(f"[startup] Loading embedding model: {EMBED_MODEL_ID} ...", flush=True)
+    print(f"[startup] Loading embedding model ({EMBED_DEVICE}): {EMBED_MODEL_ID} ...", flush=True)
     model = _get_embed_model()
     try:
         # Warm one forward pass so weights/kernels are materialized.
