@@ -30,12 +30,20 @@ def _in_colab() -> bool:
 
 
 _DEFAULT_BASE = Path("/content") if _in_colab() else Path.cwd()
-DEFAULT_REPO_DIR   = _DEFAULT_BASE / "ml-cubifyanything"
-DEFAULT_MODEL_PATH = _DEFAULT_BASE / "cutr_rgb.pth"
+DEFAULT_REPO_DIR = _DEFAULT_BASE / "ml-cubifyanything"
 
-# Path to the cloned ml-cubifyanything repo (the same one the notebook uses).
+# Path to the cloned ml-cubifyanything repo.
 # Override with env var CUBIFY_REPO if needed.
 REPO_DIR = Path(os.environ.get("CUBIFY_REPO", str(DEFAULT_REPO_DIR)))
+
+# Default CuTR checkpoint path.
+# Override with env var CUTR_MODEL_PATH if needed.
+DEFAULT_MODEL_PATH = Path(
+    os.environ.get(
+        "CUTR_MODEL_PATH",
+        str(REPO_DIR / "models" / "cutr_rgb.pth")
+    )
+)
 TOOLS_DIR = REPO_DIR / "tools"
 
 if TOOLS_DIR.exists() and str(TOOLS_DIR) not in sys.path:
