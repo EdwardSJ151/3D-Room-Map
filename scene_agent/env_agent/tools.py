@@ -16,9 +16,10 @@ Configuracao via variaveis de ambiente:
 from __future__ import annotations
 
 import os
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
 
 import httpx
+from google.adk.tools import ToolContext
 
 QWEN_API_BASE: str = os.environ.get("QWEN_API_BASE", "http://localhost:8091").rstrip("/")
 ENV_JOB_ID: str = os.environ.get("ENV_JOB_ID", "").strip()
@@ -154,7 +155,7 @@ def _mock_query(query: str, k: int) -> Dict[str, Any]:
     }
 
 
-def query_environment_objects(query: str, top_k: int = 5) -> dict:
+def query_environment_objects(query: str, top_k: int = 5, tool_context: Optional[ToolContext] = None) -> dict:
     """
     Busca objetos no ambiente atual que correspondam semanticamente a `query`.
 
@@ -183,15 +184,19 @@ def query_environment_objects(query: str, top_k: int = 5) -> dict:
     if QWEN_USE_MOCK:
         return _mock_query(query.strip(), k)
 
-    if not ENV_JOB_ID:
+    job_id = (
+        (tool_context.state.get("job_id") if tool_context else None)
+        or ENV_JOB_ID
+    )
+    if not job_id:
         return _error(
-            "Variavel de ambiente ENV_JOB_ID nao esta configurada. "
+            "Nenhum job_id encontrado na sessao ou na variavel ENV_JOB_ID. "
             "O ambiente do usuario nao foi indexado. "
             "Defina QWEN_USE_MOCK=1 para testar com dados ficticios."
         )
 
     url = f"{QWEN_API_BASE}/qwen/query"
-    payload = {"job_id": ENV_JOB_ID, "query": query.strip(), "top_k": k}
+    payload = {"job_id": job_id, "query": query.strip(), "top_k": k}
 
     try:
         response = httpx.post(url, json=payload, timeout=QWEN_QUERY_TIMEOUT_S)
@@ -202,11 +207,11 @@ def query_environment_objects(query: str, top_k: int = 5) -> dict:
 
     if response.status_code == 404:
         return _error(
-            f"Job '{ENV_JOB_ID}' nao encontrado no servidor de vectorstore."
+            f"Job '{job_id}' nao encontrado no servidor de vectorstore."
         )
     if response.status_code == 409:
         return _error(
-            f"Vectorstore para o job '{ENV_JOB_ID}' ainda nao esta pronto."
+            f"Vectorstore para o job '{job_id}' ainda nao esta pronto."
         )
     if response.status_code >= 400:
         return _error(
@@ -233,7 +238,7 @@ def query_environment_objects(query: str, top_k: int = 5) -> dict:
     return {
         "status": "success",
         "query": query.strip(),
-        "job_id": ENV_JOB_ID,
+        "job_id": job_id,
         "count": len(results),
         "results": results,
     }
