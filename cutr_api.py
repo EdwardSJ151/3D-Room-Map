@@ -7,6 +7,7 @@ import random
 import string
 import sys
 import threading
+import time
 import traceback
 import zipfile
 from concurrent.futures import ThreadPoolExecutor
@@ -150,12 +151,13 @@ def _job_get(job_id: str) -> Optional[Dict[str, Any]]:
     return {"status": JOB_DONE if (d / "pred.json").exists() else JOB_ERROR}
 
 
-def _persist_status(job_id: str, status: str, error: Optional[str] = None):
+def _persist_status(job_id: str, status: str, error: Optional[str] = None, **extra):
     d = _job_dir(job_id)
     d.mkdir(parents=True, exist_ok=True)
-    payload = {"status": status}
+    payload: Dict[str, Any] = {"status": status}
     if error:
         payload["error"] = error
+    payload.update(extra)
     (d / "status.json").write_text(json.dumps(payload, indent=2))
 
 
@@ -226,6 +228,7 @@ def create_job(req: CutrRunRequest):
 
             max_edge = None if req.max_edge is None or int(req.max_edge) <= 0 else int(req.max_edge)
 
+            _t0 = time.perf_counter()
             pred = runner.infer(
                 image=img,
                 K=K_user,
@@ -233,12 +236,14 @@ def create_job(req: CutrRunRequest):
                 score_thresh=float(req.score_thresh),
                 max_edge=max_edge,
             )
+            cutr_inference_time_s = time.perf_counter() - _t0
 
             pred_path = d / "pred.json"
             mods["save_pred_json"](pred, image_path=image_path, out_path=pred_path)
 
+            num_detections = len(pred.get("detections", []))
             with open(log_path, "w") as f:
-                f.write(f"detections={len(pred.get('detections', []))}\n")
+                f.write(f"detections={num_detections}\n")
 
             # Zip everything in the job folder for /download.
             zip_path = d / f"{job_id}.zip"
@@ -248,7 +253,11 @@ def create_job(req: CutrRunRequest):
                         zf.write(p, arcname=p.name)
 
             _job_set(job_id, status=JOB_DONE, result_zip=str(zip_path), pred_path=str(pred_path))
-            _persist_status(job_id, JOB_DONE)
+            _persist_status(
+                job_id, JOB_DONE,
+                num_detections=num_detections,
+                cutr_inference_time_s=round(cutr_inference_time_s, 4),
+            )
         except Exception as e:
             tb = traceback.format_exc()
             try:

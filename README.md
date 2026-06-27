@@ -7,9 +7,12 @@ Two FastAPI services, each in its own conda env and terminal.
 ```bash
 bash setup_cubify.sh
 conda activate Cubify
-export CUBIFY_REPO=/content/ml-cubifyanything   # path to the cloned repo
-export CUTR_MODEL_PATH=/content/cutr_rgb.pth    # optional; default is /content/cutr_rgb.pth
 uvicorn cutr_api:app --host 0.0.0.0 --port 8090 --workers 1
+```
+
+The script clones the repo, installs dependencies, and downloads `cutr_rgb.pth` automatically. By default everything goes into `./ml-cubifyanything/`. Override with:
+```bash
+export CUBIFY_REPO=/your/path/ml-cubifyanything   # before running setup_cubify.sh
 ```
 
 Endpoints:
@@ -58,7 +61,8 @@ Endpoints:
 4. `POST /qwen/query` with `{job_id, query}`.
 
 ## Env vars (optional)
-- `CUBIFY_REPO` — path to `ml-cubifyanything` (default `/content/ml-cubifyanything`)
+- `CUBIFY_REPO` — path to `ml-cubifyanything` clone (default `./ml-cubifyanything`)
+- `CUTR_MODEL_PATH` — path to `cutr_rgb.pth` (default `$CUBIFY_REPO/models/cutr_rgb.pth`)
 - `CUTR_JOBS_DIR` / `QWEN_JOBS_DIR` — output folders (default `cutr_jobs/`, `qwen_jobs/`)
 - `VLLM_BASE`, `VLLM_MODEL` — vLLM endpoint (defaults `http://localhost:8010/v1`, `MY_MODEL`)
 - `QWEN_EMBED_MODEL` — embedding model id (default `Qwen/Qwen3-Embedding-0.6B`)
