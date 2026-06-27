@@ -1,0 +1,8 @@
+[
+  {
+    "scene_id": "scene_01",
+    "image_path": "eval/scenes/scene_01/image.png",
+    "meta_path": "eval/scenes/scene_01/meta.json",
+    "room_type": "unknown"
+  }
+]

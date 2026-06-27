@@ -13,6 +13,7 @@ Configuracao via variaveis de ambiente:
 from __future__ import annotations
 
 import os
+import time
 from typing import Any, Dict, List, Optional
 
 import httpx
@@ -72,7 +73,11 @@ def query_environment_objects(query: str, top_k: int = 5, tool_context: Optional
     payload = {"job_id": job_id, "query": query.strip(), "top_k": k}
 
     try:
+        _t0 = time.perf_counter()
         response = httpx.post(url, json=payload, timeout=QWEN_QUERY_TIMEOUT_S)
+        retrieval_time_ms = (time.perf_counter() - _t0) * 1000.0
+        if tool_context:
+            tool_context.state["retrieval_time_ms"] = round(retrieval_time_ms, 2)
     except httpx.TimeoutException:
         return _error(f"Timeout ao consultar o vectorstore em {url}.")
     except httpx.RequestError as exc:

@@ -9,6 +9,7 @@ import random
 import re
 import string
 import threading
+import time
 import traceback
 from concurrent.futures import ThreadPoolExecutor
 from io import BytesIO
@@ -244,7 +245,7 @@ async def _run_prompt_on_crops(
     return results
 
 
-def _build_vectorstore(job_id: str, items: List[Dict[str, Any]]):
+def _build_vectorstore(job_id: str, items: List[Dict[str, Any]], timing: Optional[Dict[str, float]] = None):
     """Background task. items: [{idx, tag, tags, object, description}]."""
     import faiss
 
@@ -265,6 +266,7 @@ def _build_vectorstore(job_id: str, items: List[Dict[str, Any]]):
                 "description": it["description"],
             })
 
+        _t0 = time.perf_counter()
         embs = model.encode(
             texts,
             convert_to_numpy=True,
@@ -273,6 +275,7 @@ def _build_vectorstore(job_id: str, items: List[Dict[str, Any]]):
         )
         index = faiss.IndexFlatIP(embs.shape[1])
         index.add(embs)
+        embedding_indexing_time_s = time.perf_counter() - _t0
 
         d = _job_dir(job_id)
         d.mkdir(parents=True, exist_ok=True)
@@ -281,6 +284,11 @@ def _build_vectorstore(job_id: str, items: List[Dict[str, Any]]):
             pickle.dump(metadata, f)
 
         _faiss_cache[job_id] = (index, metadata)
+
+        combined_timing = dict(timing or {})
+        combined_timing["embedding_indexing_time_s"] = round(embedding_indexing_time_s, 4)
+        (d / "timing.json").write_text(json.dumps(combined_timing, indent=2))
+
         _vs_set(job_id, status=VS_DONE, n=len(metadata), error=None)
     except Exception as e:
         tb = traceback.format_exc()
@@ -381,19 +389,23 @@ async def run_qwen(req: QwenRunRequest):
     if not detections:
         raise HTTPException(status_code=400, detail="pred.detections is empty")
 
+    _t_crop0 = time.perf_counter()
     crops: List[Tuple[int, Image.Image]] = []
     for i, det in enumerate(detections):
         c = _crop_for_detection(img, det)
         if c is not None:
             crops.append((i, c))
+    crop_generation_time_s = time.perf_counter() - _t_crop0
 
     if not crops:
         raise HTTPException(status_code=400, detail="No valid crops produced from detections")
 
     # Run both prompts concurrently across crops.
+    _t_label0 = time.perf_counter()
     tags_task = asyncio.create_task(_run_prompt_on_crops(crops, PROMPT_TAGS))
     desc_task = asyncio.create_task(_run_prompt_on_crops(crops, PROMPT_DESCRIBE))
     tags_raw, desc_raw = await asyncio.gather(tags_task, desc_task)
+    qwen_labeling_time_s = time.perf_counter() - _t_label0
 
     items: List[Dict[str, Any]] = []
     jsonl_lines: List[str] = []
@@ -414,9 +426,14 @@ async def run_qwen(req: QwenRunRequest):
     (d / "objects.jsonl").write_text(jsonl_text)
     (d / "objects_full.json").write_text(json.dumps(items, indent=2))
 
+    timing = {
+        "crop_generation_time_s": round(crop_generation_time_s, 4),
+        "qwen_labeling_time_s": round(qwen_labeling_time_s, 4),
+    }
+
     # Kick off vectorstore build in background.
     _vs_set(job_id, status=VS_PENDING, error=None)
-    _vs_executor.submit(_build_vectorstore, job_id, items)
+    _vs_executor.submit(_build_vectorstore, job_id, items, timing)
 
     return PlainTextResponse(jsonl_text, media_type="application/x-ndjson")
 
