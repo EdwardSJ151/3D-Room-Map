@@ -1,8 +1,146 @@
 [
   {
-    "scene_id": "scene_01",
-    "image_path": "eval/scenes/scene_01/image.png",
-    "meta_path": "eval/scenes/scene_01/meta.json",
+    "scene_id": "room01",
+    "image_path": "eval/images/room1.jpeg",
+    "meta_path": "eval/intrinsics/room1.meta.json",
+    "room_type": "unknown"
+  },
+  {
+    "scene_id": "room02",
+    "image_path": "eval/images/room2.jpeg",
+    "meta_path": "eval/intrinsics/room2.meta.json",
+    "room_type": "unknown"
+  },
+  {
+    "scene_id": "room03",
+    "image_path": "eval/images/room3.jpeg",
+    "meta_path": "eval/intrinsics/room3.meta.json",
+    "room_type": "unknown"
+  },
+  {
+    "scene_id": "room04",
+    "image_path": "eval/images/room4.jpeg",
+    "meta_path": "eval/intrinsics/room4.meta.json",
+    "room_type": "unknown"
+  },
+  {
+    "scene_id": "room05",
+    "image_path": "eval/images/room5.jpeg",
+    "meta_path": "eval/intrinsics/room5.meta.json",
+    "room_type": "unknown"
+  },
+  {
+    "scene_id": "room06",
+    "image_path": "eval/images/room6.jpeg",
+    "meta_path": "eval/intrinsics/room6.meta.json",
+    "room_type": "unknown"
+  },
+  {
+    "scene_id": "room07",
+    "image_path": "eval/images/room7.jpeg",
+    "meta_path": "eval/intrinsics/room7.meta.json",
+    "room_type": "unknown"
+  },
+  {
+    "scene_id": "room08",
+    "image_path": "eval/images/room8.jpeg",
+    "meta_path": "eval/intrinsics/room8.meta.json",
+    "room_type": "unknown"
+  },
+  {
+    "scene_id": "room09",
+    "image_path": "eval/images/room9.jpeg",
+    "meta_path": "eval/intrinsics/room9.meta.json",
+    "room_type": "unknown"
+  },
+  {
+    "scene_id": "room10",
+    "image_path": "eval/images/room10.jpeg",
+    "meta_path": "eval/intrinsics/room10.meta.json",
+    "room_type": "unknown"
+  },
+  {
+    "scene_id": "room11",
+    "image_path": "eval/images/room11.jpeg",
+    "meta_path": "eval/intrinsics/room11.meta.json",
+    "room_type": "unknown"
+  },
+  {
+    "scene_id": "room12",
+    "image_path": "eval/images/room12.jpeg",
+    "meta_path": "eval/intrinsics/room12.meta.json",
+    "room_type": "unknown"
+  },
+  {
+    "scene_id": "room13",
+    "image_path": "eval/images/room13.jpeg",
+    "meta_path": "eval/intrinsics/room13.meta.json",
+    "room_type": "unknown"
+  },
+  {
+    "scene_id": "room14",
+    "image_path": "eval/images/room14.jpeg",
+    "meta_path": "eval/intrinsics/room14.meta.json",
+    "room_type": "unknown"
+  },
+  {
+    "scene_id": "room15",
+    "image_path": "eval/images/room15.jpeg",
+    "meta_path": "eval/intrinsics/room15.meta.json",
+    "room_type": "unknown"
+  },
+  {
+    "scene_id": "room16",
+    "image_path": "eval/images/room16.jpeg",
+    "meta_path": "eval/intrinsics/room16.meta.json",
+    "room_type": "unknown"
+  },
+  {
+    "scene_id": "room17",
+    "image_path": "eval/images/room17.jpeg",
+    "meta_path": "eval/intrinsics/room17.meta.json",
+    "room_type": "unknown"
+  },
+  {
+    "scene_id": "room18",
+    "image_path": "eval/images/room18.jpeg",
+    "meta_path": "eval/intrinsics/room18.meta.json",
+    "room_type": "unknown"
+  },
+  {
+    "scene_id": "room19",
+    "image_path": "eval/images/room19.jpg",
+    "meta_path": "eval/intrinsics/room19.meta.json",
+    "room_type": "unknown"
+  },
+  {
+    "scene_id": "room20",
+    "image_path": "eval/images/room20.jpeg",
+    "meta_path": "eval/intrinsics/room20.meta.json",
+    "room_type": "unknown"
+  },
+  {
+    "scene_id": "room21",
+    "image_path": "eval/images/room21.jpeg",
+    "meta_path": "eval/intrinsics/room21.meta.json",
+    "room_type": "unknown"
+  },
+  {
+    "scene_id": "room22",
+    "image_path": "eval/images/room22.jpeg",
+    "meta_path": "eval/intrinsics/room22.meta.json",
+    "room_type": "unknown"
+  },
+  {
+    "scene_id": "room23",
+    "image_path": "eval/images/room23.jpeg",
+    "meta_path": "eval/intrinsics/room23.meta.json",
+    "room_type": "unknown"
+  },
+  {
+    "scene_id": "room24",
+    "image_path": "eval/images/room24.jpeg",
+    "meta_path": "eval/intrinsics/room24.meta.json",
     "room_type": "unknown"
   }
 ]

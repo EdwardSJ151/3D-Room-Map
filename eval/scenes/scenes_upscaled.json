@@ -1,0 +1,146 @@
+[
+  {
+    "scene_id": "room01",
+    "image_path": "eval/images_upscale/room1.jpeg",
+    "meta_path": "eval/intrinsics_upscale/room1.meta.json",
+    "room_type": "unknown"
+  },
+  {
+    "scene_id": "room02",
+    "image_path": "eval/images_upscale/room2.jpeg",
+    "meta_path": "eval/intrinsics_upscale/room2.meta.json",
+    "room_type": "unknown"
+  },
+  {
+    "scene_id": "room03",
+    "image_path": "eval/images_upscale/room3.jpeg",
+    "meta_path": "eval/intrinsics_upscale/room3.meta.json",
+    "room_type": "unknown"
+  },
+  {
+    "scene_id": "room04",
+    "image_path": "eval/images_upscale/room4.jpeg",
+    "meta_path": "eval/intrinsics_upscale/room4.meta.json",
+    "room_type": "unknown"
+  },
+  {
+    "scene_id": "room05",
+    "image_path": "eval/images_upscale/room5.jpeg",
+    "meta_path": "eval/intrinsics_upscale/room5.meta.json",
+    "room_type": "unknown"
+  },
+  {
+    "scene_id": "room06",
+    "image_path": "eval/images_upscale/room6.jpeg",
+    "meta_path": "eval/intrinsics_upscale/room6.meta.json",
+    "room_type": "unknown"
+  },
+  {
+    "scene_id": "room07",
+    "image_path": "eval/images_upscale/room7.jpeg",
+    "meta_path": "eval/intrinsics_upscale/room7.meta.json",
+    "room_type": "unknown"
+  },
+  {
+    "scene_id": "room08",
+    "image_path": "eval/images_upscale/room8.jpeg",
+    "meta_path": "eval/intrinsics_upscale/room8.meta.json",
+    "room_type": "unknown"
+  },
+  {
+    "scene_id": "room09",
+    "image_path": "eval/images_upscale/room9.jpeg",
+    "meta_path": "eval/intrinsics_upscale/room9.meta.json",
+    "room_type": "unknown"
+  },
+  {
+    "scene_id": "room10",
+    "image_path": "eval/images_upscale/room10.jpeg",
+    "meta_path": "eval/intrinsics_upscale/room10.meta.json",
+    "room_type": "unknown"
+  },
+  {
+    "scene_id": "room11",
+    "image_path": "eval/images_upscale/room11.jpeg",
+    "meta_path": "eval/intrinsics_upscale/room11.meta.json",
+    "room_type": "unknown"
+  },
+  {
+    "scene_id": "room12",
+    "image_path": "eval/images_upscale/room12.jpeg",
+    "meta_path": "eval/intrinsics_upscale/room12.meta.json",
+    "room_type": "unknown"
+  },
+  {
+    "scene_id": "room13",
+    "image_path": "eval/images_upscale/room13.jpeg",
+    "meta_path": "eval/intrinsics_upscale/room13.meta.json",
+    "room_type": "unknown"
+  },
+  {
+    "scene_id": "room14",
+    "image_path": "eval/images_upscale/room14.jpeg",
+    "meta_path": "eval/intrinsics_upscale/room14.meta.json",
+    "room_type": "unknown"
+  },
+  {
+    "scene_id": "room15",
+    "image_path": "eval/images_upscale/room15.jpeg",
+    "meta_path": "eval/intrinsics_upscale/room15.meta.json",
+    "room_type": "unknown"
+  },
+  {
+    "scene_id": "room16",
+    "image_path": "eval/images_upscale/room16.jpeg",
+    "meta_path": "eval/intrinsics_upscale/room16.meta.json",
+    "room_type": "unknown"
+  },
+  {
+    "scene_id": "room17",
+    "image_path": "eval/images_upscale/room17.jpeg",
+    "meta_path": "eval/intrinsics_upscale/room17.meta.json",
+    "room_type": "unknown"
+  },
+  {
+    "scene_id": "room18",
+    "image_path": "eval/images_upscale/room18.jpeg",
+    "meta_path": "eval/intrinsics_upscale/room18.meta.json",
+    "room_type": "unknown"
+  },
+  {
+    "scene_id": "room19",
+    "image_path": "eval/images_upscale/room19.jpg",
+    "meta_path": "eval/intrinsics_upscale/room19.meta.json",
+    "room_type": "unknown"
+  },
+  {
+    "scene_id": "room20",
+    "image_path": "eval/images_upscale/room20.jpeg",
+    "meta_path": "eval/intrinsics_upscale/room20.meta.json",
+    "room_type": "unknown"
+  },
+  {
+    "scene_id": "room21",
+    "image_path": "eval/images_upscale/room21.jpeg",
+    "meta_path": "eval/intrinsics_upscale/room21.meta.json",
+    "room_type": "unknown"
+  },
+  {
+    "scene_id": "room22",
+    "image_path": "eval/images_upscale/room22.jpeg",
+    "meta_path": "eval/intrinsics_upscale/room22.meta.json",
+    "room_type": "unknown"
+  },
+  {
+    "scene_id": "room23",
+    "image_path": "eval/images_upscale/room23.jpeg",
+    "meta_path": "eval/intrinsics_upscale/room23.meta.json",
+    "room_type": "unknown"
+  },
+  {
+    "scene_id": "room24",
+    "image_path": "eval/images_upscale/room24.jpeg",
+    "meta_path": "eval/intrinsics_upscale/room24.meta.json",
+    "room_type": "unknown"
+  }
+]
