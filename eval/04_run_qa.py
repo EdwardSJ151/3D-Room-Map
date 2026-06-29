@@ -1,7 +1,7 @@
 """Run all QA questions through the ADK agent and collect results.
 
 Usage:
-    python eval/04_run_qa.py [--scene-id scene_01] [--force] [--failed-only]
+    python eval/04_run_qa.py [--scene-id scene_01] [--force] [--failed-only] [--errors-only]
 """
 from __future__ import annotations
 
@@ -37,7 +37,15 @@ def get_failed_question_ids(scene_id: str) -> set[str] | None:
     return {j["question_id"] for j in judgments.get("judgments", []) if j.get("judgment") == "failure"}
 
 
-def process_scene(scene: dict, force: bool = False, failed_only: bool = False) -> None:
+def get_errored_question_ids(scene_id: str) -> set[str] | None:
+    out_path = scene_result_file(scene_id, "qa_results.json")
+    if not out_path.exists():
+        return None
+    data = json.loads(out_path.read_text())
+    return {r["question_id"] for r in data.get("results", []) if r.get("error")}
+
+
+def process_scene(scene: dict, force: bool = False, failed_only: bool = False, errors_only: bool = False) -> None:
     scene_id = scene["scene_id"]
     questions_path = scene_result_file(scene_id, "questions.json")
     mapping_path   = scene_result_file(scene_id, "mapping.json")
@@ -51,7 +59,16 @@ def process_scene(scene: dict, force: bool = False, failed_only: bool = False) -
         return
 
     failed_ids: set[str] | None = None
-    if failed_only:
+    if errors_only:
+        if not out_path.exists():
+            print(f"[{scene_id}] qa_results.json not found, skipping (--errors-only requires existing results)")
+            return
+        failed_ids = get_errored_question_ids(scene_id)
+        if not failed_ids:
+            print(f"[{scene_id}] no errored questions, skipping")
+            return
+        print(f"[{scene_id}] retrying {len(failed_ids)} errored questions")
+    elif failed_only:
         failed_ids = get_failed_question_ids(scene_id)
         if failed_ids is None:
             print(f"[{scene_id}] judgments.json not found, skipping (--failed-only requires phase 5 output)")
@@ -73,7 +90,7 @@ def process_scene(scene: dict, force: bool = False, failed_only: bool = False) -
     num_records    = mapping.get("num_generated_records", 0)
     questions      = questions_data.get("questions", [])
 
-    if failed_only:
+    if failed_ids is not None:
         questions = [q for q in questions if q["question_id"] in failed_ids]
         existing  = {r["question_id"]: r for r in json.loads(out_path.read_text()).get("results", [])}
     else:
@@ -130,7 +147,7 @@ def process_scene(scene: dict, force: bool = False, failed_only: bool = False) -
 
         new_results[qid] = result_entry
 
-    if failed_only:
+    if failed_ids is not None:
         existing.update(new_results)
         all_questions = json.loads(questions_path.read_text()).get("questions", [])
         results = [existing[q["question_id"]] for q in all_questions if q["question_id"] in existing]
@@ -141,7 +158,7 @@ def process_scene(scene: dict, force: bool = False, failed_only: bool = False) -
     output = {
         "scene_id": scene_id,
         "job_id": job_id,
-        "eval_run_id": prev.get("eval_run_id", run_id) if failed_only else run_id,
+        "eval_run_id": prev.get("eval_run_id", run_id) if failed_ids is not None else run_id,
         "timestamp_utc": datetime.now(timezone.utc).isoformat(),
         "num_records_in_scene": num_records,
         "results": results,
@@ -155,11 +172,12 @@ def main():
     parser.add_argument("--scene-id", default=None)
     parser.add_argument("--force", action="store_true")
     parser.add_argument("--failed-only", action="store_true")
+    parser.add_argument("--errors-only", action="store_true")
     args = parser.parse_args()
 
     scenes = load_scenes(args.scene_id)
     for scene in scenes:
-        process_scene(scene, force=args.force, failed_only=args.failed_only)
+        process_scene(scene, force=args.force, failed_only=args.failed_only, errors_only=args.errors_only)
 
 
 if __name__ == "__main__":
