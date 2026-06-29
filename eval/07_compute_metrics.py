@@ -317,6 +317,97 @@ def format_table3(m4: dict) -> str:
     return "\n".join(lines)
 
 
+def collect_timing_rows(scenes: list) -> list[dict]:
+    """Return one dict per QA result that had a tool call, with timing fields + metadata."""
+    rows = []
+    for scene in scenes:
+        sid = scene["scene_id"]
+        p = scene_result_file(sid, "qa_results.json")
+        if not p.exists():
+            continue
+        data = json.loads(p.read_text())
+        for r in data.get("results", []):
+            if not r.get("tool_was_called"):
+                continue
+            rows.append({
+                "scene_id": sid,
+                "question_id": r.get("question_id", ""),
+                "retrieval_ms": r.get("retrieval_time_ms"),
+                "generation_ms": r.get("response_generation_time_ms"),
+                "total_ms": r.get("total_query_to_answer_time_ms"),
+            })
+    return rows
+
+
+def plot_timings(scenes: list, out_dir: Path) -> None:
+    try:
+        import matplotlib
+        matplotlib.use("Agg")
+        import matplotlib.pyplot as plt
+        import matplotlib.patches as mpatches
+    except ImportError:
+        print("[plot] matplotlib not installed, skipping timing plots", file=sys.stderr)
+        return
+
+    rows = collect_timing_rows(scenes)
+    if not rows:
+        print("[plot] no timing data to plot", file=sys.stderr)
+        return
+
+    retrieval  = [r["retrieval_ms"]  for r in rows if r["retrieval_ms"]  is not None]
+    generation = [r["generation_ms"] for r in rows if r["generation_ms"] is not None]
+    total      = [r["total_ms"]      for r in rows if r["total_ms"]      is not None]
+
+    fig, axes = plt.subplots(1, 2, figsize=(14, 6))
+    fig.suptitle("Query Timing Distribution", fontsize=14)
+
+    # --- Box plot ---
+    ax = axes[0]
+    labels = ["Retrieval", "Generation", "Total"]
+    data   = [retrieval, generation, total]
+    bp = ax.boxplot(data, labels=labels, patch_artist=True, showfliers=True,
+                    flierprops=dict(marker="o", markersize=4, alpha=0.5))
+    colors = ["#4C9BE8", "#E87C4C", "#4CE87C"]
+    for patch, color in zip(bp["boxes"], colors):
+        patch.set_facecolor(color)
+    ax.set_ylabel("Time (ms)")
+    ax.set_title("Box plot (outliers shown)")
+    ax.grid(axis="y", alpha=0.3)
+
+    # --- Scatter: retrieval vs total, coloured by generation ---
+    ax2 = axes[1]
+    xs = [r["retrieval_ms"]  for r in rows if None not in (r["retrieval_ms"], r["total_ms"], r["generation_ms"])]
+    ys = [r["total_ms"]      for r in rows if None not in (r["retrieval_ms"], r["total_ms"], r["generation_ms"])]
+    cs = [r["generation_ms"] for r in rows if None not in (r["retrieval_ms"], r["total_ms"], r["generation_ms"])]
+
+    sc = ax2.scatter(xs, ys, c=cs, cmap="plasma", alpha=0.7, s=30)
+    fig.colorbar(sc, ax=ax2, label="Generation time (ms)")
+    ax2.set_xlabel("Retrieval time (ms)")
+    ax2.set_ylabel("Total time (ms)")
+    ax2.set_title("Retrieval vs Total (colour = generation)")
+    ax2.grid(alpha=0.3)
+
+    # Annotate top-5 outliers by total time
+    if ys:
+        threshold = sorted(ys, reverse=True)[min(4, len(ys) - 1)]
+        for r in rows:
+            if None in (r["retrieval_ms"], r["total_ms"], r["generation_ms"]):
+                continue
+            if r["total_ms"] >= threshold:
+                ax2.annotate(
+                    r["question_id"].split("_")[-1],
+                    (r["retrieval_ms"], r["total_ms"]),
+                    fontsize=7, alpha=0.8,
+                    xytext=(4, 4), textcoords="offset points",
+                )
+
+    plt.tight_layout()
+    out_path = out_dir / "timing_plots.png"
+    plt.savefig(out_path, dpi=150)
+    plt.close(fig)
+    print(f"timing_plots.png → {out_path}")
+
+
 def main():
     scenes = load_scenes()
     print(f"Computing metrics for {len(scenes)} scenes...", flush=True)
@@ -344,6 +435,8 @@ def main():
     md_path = RESULTS_DIR / "summary.md"
     md_path.write_text("\n".join(md_parts))
     print(f"summary.md  → {md_path}")
+
+    plot_timings(scenes, RESULTS_DIR)
 
     print("\n--- Quick view ---")
     overall = m4.get("overall", {})
