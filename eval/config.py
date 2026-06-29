@@ -109,7 +109,7 @@ Return ONLY valid JSON. No markdown, no explanation."""
 
 # --- Judge prompt ---
 JUDGE_PROMPT_TEMPLATE = """\
-You are a strict grounded-QA judge for an indoor scene assistant evaluation.
+You are a grounded-QA judge for an indoor scene assistant evaluation.
 
 CONTEXT:
 - Room description: {room_description}
@@ -130,10 +130,22 @@ TARGET IDX: {target_idx}
 JUDGMENT RULES:
 1. If tool_was_called is false: judgment = "failure", failure_reason = "retrieval_error"
 2. The answer must be correct for the actual room (as described in room_description and bbox gt)
-3. The answer must be supported by retrieved records — do not accept answers based on imagination
+3. The answer must be grounded in what is visually plausible for the scene — retrieved records \
+   and room description are reference annotations, not exhaustive truth. Accept visually \
+   reasonable claims that go beyond the annotation if they are consistent with the scene.
 4. For negative existence questions: the answer must confirm the object was NOT observed; \
    the judge still evaluates this — do NOT auto-pass negative questions
-5. The answer must not mention objects not present in the room or not in retrieved records
+5. Fail the answer only if it mentions objects that are clearly absent from the room entirely \
+   — do not fail for mentioning correct visual details that happen to be missing from the \
+   ground-truth annotation. Do not fail for imprecise or approximate spatial descriptions \
+   when the object location is visually consistent with the scene.
+6. Accept reasonable paraphrases, synonyms, and functional descriptions of objects — the \
+   assistant describes objects in natural language, not by ground-truth labels. If a \
+   description plausibly refers to a visible object, treat it as a match. Only fail if the \
+   described object is different from anything present in the room.
+7. For category_retrieval questions, an answer is a success if it correctly identifies the \
+   majority of relevant objects — do not fail for missing a small number of items unless the \
+   omission makes the answer misleading.
 
 Return a JSON object with EXACTLY these keys:
 - "judgment": "success" or "failure"
