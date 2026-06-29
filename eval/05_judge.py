@@ -1,7 +1,7 @@
 """Judge each QA answer using the configured judge (Gemini or vLLM).
 
 Usage:
-    python eval/05_judge.py [--scene-id scene_01] [--force]
+    python eval/05_judge.py [--scene-id scene_01] [--force] [--failed-only]
 """
 from __future__ import annotations
 
@@ -84,7 +84,7 @@ def collect_images(qa_result: dict, image_path: Path, pred: dict, tmp_dir: Path)
     return images
 
 
-def process_scene(scene: dict, force: bool = False) -> None:
+def process_scene(scene: dict, force: bool = False, failed_only: bool = False) -> None:
     scene_id   = scene["scene_id"]
     gt_path    = scene_result_file(scene_id, "ground_truth.json")
     qa_path    = scene_result_file(scene_id, "qa_results.json")
@@ -98,7 +98,21 @@ def process_scene(scene: dict, force: bool = False) -> None:
             print(f"[{scene_id}] {name} not found, skipping")
             return
 
-    if out_path.exists() and not force:
+    # Load existing judgments to find which question IDs previously failed.
+    prev_judgments: dict[str, dict] = {}
+    failed_ids: set[str] = set()
+    if failed_only:
+        if not out_path.exists():
+            print(f"[{scene_id}] judgments.json not found, skipping (--failed-only requires prior phase 5 output)")
+            return
+        prev_data = json.loads(out_path.read_text())
+        prev_judgments = {j["question_id"]: j for j in prev_data.get("judgments", [])}
+        failed_ids = {qid for qid, j in prev_judgments.items() if j.get("judgment") != "success"}
+        if not failed_ids:
+            print(f"[{scene_id}] no failures found, nothing to re-judge")
+            return
+        print(f"[{scene_id}] re-judging {len(failed_ids)} failed question(s)")
+    elif out_path.exists() and not force:
         print(f"[{scene_id}] judgments.json exists, skipping (--force to redo)")
         return
 
@@ -124,6 +138,11 @@ def process_scene(scene: dict, force: bool = False) -> None:
         for i, qa_result in enumerate(qa_data.get("results", [])):
             qid = qa_result["question_id"]
             question = q_map.get(qid, {})
+
+            if failed_only and qid not in failed_ids:
+                judgments.append(prev_judgments[qid])
+                continue
+
             print(f"  [{i+1}] {qid}", flush=True)
 
             # Auto-fail when tool wasn't called
@@ -168,6 +187,8 @@ def process_scene(scene: dict, force: bool = False) -> None:
         "timestamp_utc": datetime.now(timezone.utc).isoformat(),
         "judgments": judgments,
     }
+    if failed_only and prev_data:
+        output["eval_run_id"] = prev_data.get("eval_run_id", output.get("eval_run_id"))
     out_path.write_text(json.dumps(output, indent=2))
     successes = sum(1 for j in judgments if j["judgment"] == "success")
     print(f"  [done] {successes}/{len(judgments)} success → {out_path}")
@@ -177,11 +198,12 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--scene-id", default=None)
     parser.add_argument("--force", action="store_true")
+    parser.add_argument("--failed-only", action="store_true")
     args = parser.parse_args()
 
     scenes = load_scenes(args.scene_id)
     for scene in scenes:
-        process_scene(scene, force=args.force)
+        process_scene(scene, force=args.force, failed_only=args.failed_only)
 
 
 if __name__ == "__main__":
