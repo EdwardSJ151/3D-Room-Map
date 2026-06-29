@@ -53,6 +53,21 @@ Endpoints:
 - `GET  /qwen/jobs/{job_id}/vectorstore` — `{status, n?, error?}`
 - `POST /qwen/query` — `{job_id, query, top_k?}` → top-k matches.
 
+## 3. ADK Agent (`scene_agent/`)
+
+```bash
+bash setup_adk.sh
+conda activate ADK
+cd scene_agent
+adk api_server --host 0.0.0.0 --port 8002 .
+```
+
+Set `GOOGLE_API_KEY` in `scene_agent/env_agent/.env` before starting. The agent reads `job_id` from session state — create a session first via `run_full_pipeline.py` or the eval scripts.
+
+Endpoints (ADK standard):
+- `POST /apps/env_agent/users/{userId}/sessions` — `{session_id, state: {job_id}}` → creates session
+- `POST /run` — `{app_name, user_id, session_id, new_message}` → returns event array
+
 ## Typical flow
 
 1. `POST /cutr/jobs` → get `job_id`, poll `GET /cutr/jobs/{job_id}` until `done`, download `pred.json` from `/download`.

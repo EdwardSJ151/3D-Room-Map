@@ -13,7 +13,9 @@ Configuracao via variaveis de ambiente:
 from __future__ import annotations
 
 import os
+import sys
 import time
+from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 import httpx
@@ -22,6 +24,9 @@ from google.adk.tools import ToolContext
 QWEN_API_BASE: str = os.environ.get("QWEN_API_BASE", "http://localhost:8091").rstrip("/")
 ENV_JOB_ID: str = os.environ.get("ENV_JOB_ID", "").strip()
 QWEN_QUERY_TIMEOUT_S: float = float(os.environ.get("QWEN_QUERY_TIMEOUT_S", "15"))
+SEND_CROP_IMAGES: bool = os.environ.get("AGENT_SEND_CROP_IMAGES", "0") == "1"
+
+_REPO_ROOT = Path(__file__).resolve().parent.parent.parent
 
 _MAX_TOP_K = 20
 
@@ -112,6 +117,20 @@ def query_environment_objects(query: str, top_k: int = 5, tool_context: Optional
             "tags": list(hit.get("tags") or []),
             "score": float(hit.get("score", 0.0)),
         })
+
+    # Verify room image exists early — the after_tool_callback will inject it properly.
+    image_path = _REPO_ROOT / "cutr_jobs" / job_id / "input.png"
+    if not image_path.exists():
+        print(f"[tools] ERROR: room image not found at {image_path}", file=sys.stderr)
+        return _error(f"Room image not found for job '{job_id}'. Ensure CuTR job completed successfully.")
+
+    # Signal to the after_tool_callback which job's image to inject.
+    if tool_context:
+        tool_context.state["_pending_room_image_job_id"] = job_id
+
+    # Optionally signal crop injection.
+    if SEND_CROP_IMAGES and tool_context:
+        tool_context.state["_pending_crop_idxs"] = [r["idx"] for r in results]
 
     return {
         "status": "success",

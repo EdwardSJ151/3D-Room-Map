@@ -22,6 +22,8 @@ from openai import AsyncOpenAI
 from PIL import Image
 from pydantic import BaseModel, Field
 
+from crop_utils import save_detection_crops
+
 # ----------------------------
 # Config (mirrors inference_timing.ipynb)
 # ----------------------------
@@ -154,25 +156,6 @@ def _new_job_id() -> str:
     digits    = "".join(random.choices(string.digits, k=2))
     letters_b = "".join(random.choices(string.ascii_lowercase, k=2))
     return f"{letters_a}{digits}{letters_b}"
-
-
-def _clamp(v: float, lo: float, hi: float) -> float:
-    return max(lo, min(hi, v))
-
-
-def _crop_for_detection(img: Image.Image, det: Dict[str, Any]) -> Optional[Image.Image]:
-    bbox = det.get("bbox_xyxy")
-    if not bbox or len(bbox) != 4:
-        return None
-    w, h = img.size
-    x1, y1, x2, y2 = [float(v) for v in bbox]
-    x1 = _clamp(x1, 0.0, w - 1.0); y1 = _clamp(y1, 0.0, h - 1.0)
-    x2 = _clamp(x2, 0.0, w - 1.0); y2 = _clamp(y2, 0.0, h - 1.0)
-    x1_i = max(0, int(round(x1))); y1_i = max(0, int(round(y1)))
-    x2_i = max(0, int(round(x2))); y2_i = max(0, int(round(y2)))
-    if x2_i - x1_i < 2 or y2_i - y1_i < 2:
-        return None
-    return img.crop((x1_i, y1_i, x2_i, y2_i))
 
 
 def _encode_image_b64(img: Image.Image, quality: int = 85) -> str:
@@ -390,11 +373,7 @@ async def run_qwen(req: QwenRunRequest):
         raise HTTPException(status_code=400, detail="pred.detections is empty")
 
     _t_crop0 = time.perf_counter()
-    crops: List[Tuple[int, Image.Image]] = []
-    for i, det in enumerate(detections):
-        c = _crop_for_detection(img, det)
-        if c is not None:
-            crops.append((i, c))
+    crops = save_detection_crops(img, detections, d / "crops")
     crop_generation_time_s = time.perf_counter() - _t_crop0
 
     if not crops:

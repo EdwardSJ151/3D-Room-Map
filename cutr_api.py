@@ -18,6 +18,8 @@ from fastapi import FastAPI, HTTPException
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 
+from crop_utils import save_detection_crops
+
 # Paths / cubify repo
 def _in_colab() -> bool:
     # Colab sets COLAB_RELEASE_TAG and ships a google.colab module.
@@ -241,6 +243,9 @@ def create_job(req: CutrRunRequest):
             pred_path = d / "pred.json"
             mods["save_pred_json"](pred, image_path=image_path, out_path=pred_path)
 
+            crops_dir = d / "crops"
+            save_detection_crops(img, pred.get("detections") or [], crops_dir)
+
             num_detections = len(pred.get("detections", []))
             with open(log_path, "w") as f:
                 f.write(f"detections={num_detections}\n")
@@ -251,6 +256,9 @@ def create_job(req: CutrRunRequest):
                 for p in (pred_path, image_path, meta_path, log_path):
                     if p.exists():
                         zf.write(p, arcname=p.name)
+                if crops_dir.exists():
+                    for p in sorted(crops_dir.glob("*.jpg")):
+                        zf.write(p, arcname=f"crops/{p.name}")
 
             _job_set(job_id, status=JOB_DONE, result_zip=str(zip_path), pred_path=str(pred_path))
             _persist_status(

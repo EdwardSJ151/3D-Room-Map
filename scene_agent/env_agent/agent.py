@@ -12,14 +12,20 @@ Para executar:
 """
 
 import os
+from pathlib import Path
 from typing import Any, Optional
 
 from google import genai
 from google.adk.agents import Agent
 from google.adk.tools.base_tool import BaseTool
 from google.adk.tools import ToolContext
+from google.genai import types as genai_types
 
 from .tools import query_environment_objects
+
+_REPO_ROOT = Path(__file__).resolve().parent.parent.parent
+_CUTR_JOBS = _REPO_ROOT / "cutr_jobs"
+_QWEN_JOBS = _REPO_ROOT / "qwen_jobs"
 
 GEMINI_MODEL = os.environ.get("GEMINI_MODEL", "gemini-2.5-flash").strip()
 _SELECTOR_MODEL = os.environ.get("SELECTOR_MODEL", "gemini-2.5-flash").strip()
@@ -65,7 +71,13 @@ INSTRUCTION = (
     "is, or asks to describe something visible. Formulate a short natural-"
     "language query. Base the final answer only on returned objects. If the "
     "tool returns status error, say in natural speech that the environment "
-    "is unavailable and why, still as a single plain text block."
+    "is unavailable and why, still as a single plain text block.\n"
+    "\n"
+    "When the question has a direct answer (a direction, a yes/no, a specific "
+    "object), state it clearly at the start of your response before adding "
+    "any context. The tool response includes a full room image — use it to "
+    "understand spatial and relational information about the scene, such as "
+    "object positions, directions, and layout."
 )
 
 
@@ -118,6 +130,31 @@ async def _capture_best_idx(
     return None
 
 
+def _inject_room_image(callback_context: Any, llm_request: Any) -> Optional[Any]:
+    job_id = callback_context.state.get("_pending_room_image_job_id")
+    if not job_id:
+        return None
+    callback_context.state["_pending_room_image_job_id"] = None
+
+    image_path = _CUTR_JOBS / job_id / "input.png"
+    parts = [genai_types.Part.from_bytes(data=image_path.read_bytes(), mime_type="image/png")]
+
+    crop_idxs = callback_context.state.get("_pending_crop_idxs")
+    if crop_idxs:
+        callback_context.state["_pending_crop_idxs"] = None
+        crops_dir = _QWEN_JOBS / job_id / "crops"
+        for idx in crop_idxs:
+            crop_path = crops_dir / f"{idx}.jpg"
+            if crop_path.exists():
+                parts.append(genai_types.Part.from_bytes(data=crop_path.read_bytes(), mime_type="image/jpeg"))
+
+    if llm_request.contents and llm_request.contents[-1].role == "user":
+        llm_request.contents[-1].parts.extend(parts)
+    else:
+        llm_request.contents.append(genai_types.Content(role="user", parts=parts))
+    return None
+
+
 root_agent = Agent(
     name="env_agent",
     model=GEMINI_MODEL,
@@ -129,6 +166,7 @@ root_agent = Agent(
     instruction=INSTRUCTION,
     tools=[query_environment_objects],
     after_tool_callback=_capture_best_idx,
+    before_model_callback=_inject_room_image,
 )
 
 __all__ = ["root_agent"]
