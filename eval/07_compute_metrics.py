@@ -365,8 +365,10 @@ def plot_timings(scenes: list, out_dir: Path) -> None:
     ax = axes[0]
     labels = ["Retrieval", "Generation", "Total"]
     data   = [retrieval, generation, total]
-    bp = ax.boxplot(data, labels=labels, patch_artist=True, showfliers=True,
+    bp = ax.boxplot(data, patch_artist=True, showfliers=True,
                     flierprops=dict(marker="o", markersize=4, alpha=0.5))
+    ax.set_xticks([1, 2, 3])
+    ax.set_xticklabels(labels)
     colors = ["#4C9BE8", "#E87C4C", "#4CE87C"]
     for patch, color in zip(bp["boxes"], colors):
         patch.set_facecolor(color)
