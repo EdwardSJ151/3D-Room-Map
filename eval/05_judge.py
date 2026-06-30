@@ -1,7 +1,7 @@
 """Judge each QA answer using the configured judge (Gemini or vLLM).
 
 Usage:
-    python eval/05_judge.py [--scene-id scene_01] [--force] [--failed-only]
+    python eval/05_judge.py [--scene-id scene_01] [--force] [--failed-only] [--grounding-only]
 """
 from __future__ import annotations
 
@@ -15,6 +15,8 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from eval.config import (
+    BEST_IDX_PROMPT_TEMPLATE,
+    EVIDENCE_RETRIEVAL_PROMPT_TEMPLATE,
     JUDGE_BACKEND,
     JUDGE_MODEL,
     JUDGE_PROMPT_TEMPLATE,
@@ -84,7 +86,83 @@ def collect_images(qa_result: dict, image_path: Path, pred: dict, tmp_dir: Path)
     return images
 
 
-def process_scene(scene: dict, force: bool = False, failed_only: bool = False) -> None:
+_GROUNDING_NA = "not_applicable"
+_GROUNDING_SKIP_CATEGORIES = {"negative_object_existence"}
+
+
+def _records_text(records: list[dict]) -> str:
+    lines = []
+    for r in records:
+        lines.append(f"  idx={r.get('idx')}: {r.get('object','')} — {r.get('description','')} (tags: {', '.join(r.get('tags') or [])})")
+    return "\n".join(lines) or "(none)"
+
+
+def run_grounding_judges(question: dict, qa_result: dict) -> dict:
+    """Run Evidence Retrieval@5 and Best-idx Accuracy judges. Returns dict with 4 fields."""
+    na = {
+        "evidence_retrieval_at_5": _GROUNDING_NA,
+        "evidence_retrieval_explanation": "",
+        "best_idx_accuracy": _GROUNDING_NA,
+        "best_idx_explanation": "",
+    }
+
+    category = question.get("category", "")
+    evidence = question.get("expected_visible_evidence", "") or ""
+
+    if category in _GROUNDING_SKIP_CATEGORIES:
+        return na
+    if "idx=" not in evidence:
+        return na
+
+    top5 = (qa_result.get("retrieved_records") or [])[:5]
+    retrieved_idx_list = [r.get("idx") for r in top5 if r.get("idx") is not None]
+    records_text = _records_text(top5)
+
+    result = dict(na)
+
+    # --- Evidence Retrieval@5 ---
+    er_prompt = EVIDENCE_RETRIEVAL_PROMPT_TEMPLATE.format(
+        category=category,
+        question=question.get("question", ""),
+        expected_answer=question.get("expected_answer", ""),
+        expected_visible_evidence=evidence,
+        retrieved_records_text=records_text,
+        retrieved_idx_list=retrieved_idx_list,
+    )
+    try:
+        er_verdict = call_judge(er_prompt, [])
+        result["evidence_retrieval_at_5"] = str(er_verdict.get("evidence_retrieval_at_5", _GROUNDING_NA)).lower()
+        result["evidence_retrieval_explanation"] = er_verdict.get("evidence_retrieval_explanation", "")
+    except Exception as e:
+        print(f"    [grounding] evidence_retrieval judge error: {e}", flush=True)
+        result["evidence_retrieval_at_5"] = "false"
+        result["evidence_retrieval_explanation"] = f"Judge call failed: {e}"
+
+    # --- Best-idx Accuracy ---
+    best_idx = qa_result.get("best_idx")
+    bi_prompt = BEST_IDX_PROMPT_TEMPLATE.format(
+        category=category,
+        question=question.get("question", ""),
+        expected_answer=question.get("expected_answer", ""),
+        expected_visible_evidence=evidence,
+        target_idx=question.get("target_idx"),
+        retrieved_records_text=records_text,
+        assistant_answer=qa_result.get("assistant_answer", ""),
+        best_idx=best_idx,
+    )
+    try:
+        bi_verdict = call_judge(bi_prompt, [])
+        result["best_idx_accuracy"] = str(bi_verdict.get("best_idx_accuracy", _GROUNDING_NA)).lower()
+        result["best_idx_explanation"] = bi_verdict.get("best_idx_explanation", "")
+    except Exception as e:
+        print(f"    [grounding] best_idx judge error: {e}", flush=True)
+        result["best_idx_accuracy"] = "false"
+        result["best_idx_explanation"] = f"Judge call failed: {e}"
+
+    return result
+
+
+def process_scene(scene: dict, force: bool = False, failed_only: bool = False, grounding_only: bool = False) -> None:
     scene_id   = scene["scene_id"]
     gt_path    = scene_result_file(scene_id, "ground_truth.json")
     qa_path    = scene_result_file(scene_id, "qa_results.json")
@@ -98,10 +176,18 @@ def process_scene(scene: dict, force: bool = False, failed_only: bool = False) -
             print(f"[{scene_id}] {name} not found, skipping")
             return
 
-    # Load existing judgments to find which question IDs previously failed.
+    prev_data: dict = {}
     prev_judgments: dict[str, dict] = {}
     failed_ids: set[str] = set()
-    if failed_only:
+
+    if grounding_only:
+        if not out_path.exists():
+            print(f"[{scene_id}] judgments.json not found, skipping (--grounding-only requires prior phase 5 output)")
+            return
+        prev_data = json.loads(out_path.read_text())
+        prev_judgments = {j["question_id"]: j for j in prev_data.get("judgments", [])}
+        print(f"[{scene_id}] running grounding judges only")
+    elif failed_only:
         if not out_path.exists():
             print(f"[{scene_id}] judgments.json not found, skipping (--failed-only requires prior phase 5 output)")
             return
@@ -139,6 +225,22 @@ def process_scene(scene: dict, force: bool = False, failed_only: bool = False) -
             qid = qa_result["question_id"]
             question = q_map.get(qid, {})
 
+            if grounding_only:
+                prev_j = prev_judgments.get(qid, {})
+                has_grounding = (
+                    "evidence_retrieval_at_5" in prev_j and
+                    "best_idx_accuracy" in prev_j
+                )
+                if has_grounding and not force:
+                    judgments.append(prev_j)
+                    continue
+                print(f"  [{i+1}] {qid} [grounding]", flush=True)
+                grounding = run_grounding_judges(question, qa_result)
+                updated = dict(prev_j)
+                updated.update(grounding)
+                judgments.append(updated)
+                continue
+
             if failed_only and qid not in failed_ids:
                 judgments.append(prev_judgments[qid])
                 continue
@@ -147,12 +249,14 @@ def process_scene(scene: dict, force: bool = False, failed_only: bool = False) -
 
             # Auto-fail when tool wasn't called
             if not qa_result.get("tool_was_called", False):
+                grounding = run_grounding_judges(question, qa_result)
                 judgments.append({
                     "question_id": qid,
                     "judgment": "failure",
                     "failure_reason": "retrieval_error",
                     "judge_explanation": "Agent did not call the object memory tool.",
                     "retrieved_idx_correct": None,
+                    **grounding,
                 })
                 continue
 
@@ -170,6 +274,7 @@ def process_scene(scene: dict, force: bool = False, failed_only: bool = False) -
                     "retrieved_idx_correct": None,
                 }
 
+            grounding = run_grounding_judges(question, qa_result)
             target_idx = question.get("target_idx")
             judgments.append({
                 "question_id": qid,
@@ -177,6 +282,7 @@ def process_scene(scene: dict, force: bool = False, failed_only: bool = False) -
                 "failure_reason": verdict.get("failure_reason"),
                 "judge_explanation": verdict.get("judge_explanation", ""),
                 "retrieved_idx_correct": verdict.get("retrieved_idx_correct") if target_idx is not None else None,
+                **grounding,
             })
 
     output = {
@@ -187,7 +293,7 @@ def process_scene(scene: dict, force: bool = False, failed_only: bool = False) -
         "timestamp_utc": datetime.now(timezone.utc).isoformat(),
         "judgments": judgments,
     }
-    if failed_only and prev_data:
+    if (failed_only or grounding_only) and prev_data:
         output["eval_run_id"] = prev_data.get("eval_run_id", output.get("eval_run_id"))
     out_path.write_text(json.dumps(output, indent=2))
     successes = sum(1 for j in judgments if j["judgment"] == "success")
@@ -199,11 +305,17 @@ def main():
     parser.add_argument("--scene-id", default=None)
     parser.add_argument("--force", action="store_true")
     parser.add_argument("--failed-only", action="store_true")
+    parser.add_argument("--grounding-only", action="store_true")
     args = parser.parse_args()
 
     scenes = load_scenes(args.scene_id)
     for scene in scenes:
-        process_scene(scene, force=args.force, failed_only=args.failed_only)
+        process_scene(
+            scene,
+            force=args.force,
+            failed_only=args.failed_only,
+            grounding_only=args.grounding_only,
+        )
 
 
 if __name__ == "__main__":

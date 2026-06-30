@@ -107,7 +107,76 @@ Rules:
 
 Return ONLY valid JSON. No markdown, no explanation."""
 
-# --- Judge prompt ---
+# --- Judge prompts ---
+EVIDENCE_RETRIEVAL_PROMPT_TEMPLATE = """\
+You are an evidence retrieval judge for an indoor scene QA evaluation.
+
+Your task: determine whether the top-5 retrieved records contain sufficient mapped evidence \
+to answer the question.
+
+QUESTION:
+Category: {category}
+Question: {question}
+Expected answer: {expected_answer}
+Expected visible evidence: {expected_visible_evidence}
+
+TOP-5 RETRIEVED RECORDS:
+{retrieved_records_text}
+Retrieved idx list: {retrieved_idx_list}
+
+RULES:
+1. Parse expected_visible_evidence to identify required evidence objects. Each \
+comma-separated item is one required object. If an item lists idx alternatives \
+(e.g. "laptop (idx=2 or idx=9)"), treat all alternatives as a single object — \
+it is found if ANY of its idx alternatives appears in the retrieved idx list.
+2. Ignore evidence items that have no idx reference (e.g. "keyboard (mentioned in context)") \
+— these are unmapped and cannot be evaluated.
+3. Count R = number of mapped required objects (those with at least one idx reference).
+4. If R = 0 after ignoring unmapped items, return not_applicable.
+5. Count M = number of those mapped objects found in the retrieved idx list.
+6. required_hits = min(R, 3). Result is true if M >= required_hits.
+
+Return a JSON object with EXACTLY these keys:
+- "evidence_retrieval_at_5": "true", "false", or "not_applicable"
+- "evidence_retrieval_explanation": 1-2 sentences explaining the judgment
+
+Return ONLY valid JSON."""
+
+BEST_IDX_PROMPT_TEMPLATE = """\
+You are a best-idx accuracy judge for an indoor scene QA evaluation.
+
+Your task: determine whether best_idx is an appropriate object anchor for the question.
+
+QUESTION:
+Category: {category}
+Question: {question}
+Expected answer: {expected_answer}
+Expected visible evidence: {expected_visible_evidence}
+Target idx: {target_idx}
+
+RETRIEVED RECORDS:
+{retrieved_records_text}
+
+ASSISTANT ANSWER:
+{assistant_answer}
+
+BEST IDX SELECTED: {best_idx}
+
+RULES:
+1. best_idx is correct if it points to one of the valid evidence objects for the question \
+as indicated by expected_visible_evidence.
+2. For multi-object questions, best_idx only needs to point to ONE valid object.
+3. If best_idx is null for an applicable question, result is "false" unless no object \
+anchor is meaningful for this question.
+4. Return "not_applicable" only if no object anchor is meaningful for this question type.
+5. This judgment is independent of Evidence Retrieval@5.
+
+Return a JSON object with EXACTLY these keys:
+- "best_idx_accuracy": "true", "false", or "not_applicable"
+- "best_idx_explanation": 1-2 sentences explaining the judgment
+
+Return ONLY valid JSON."""
+
 JUDGE_PROMPT_TEMPLATE = """\
 You are a grounded-QA judge for an indoor scene assistant evaluation.
 
@@ -142,7 +211,9 @@ JUDGMENT RULES:
 6. Accept reasonable paraphrases, synonyms, and functional descriptions of objects — the \
    assistant describes objects in natural language, not by ground-truth labels. If a \
    description plausibly refers to a visible object, treat it as a match. Only fail if the \
-   described object is different from anything present in the room.
+   described object is different from anything present in the room. Do not fail when the \
+   assistant confuses visually similar or functionally overlapping objects that could \
+   reasonably be mistaken for one another in the scene.
 7. For category_retrieval questions, an answer is a success if it correctly identifies the \
    majority of relevant objects — do not fail for missing a small number of items unless the \
    omission makes the answer misleading.

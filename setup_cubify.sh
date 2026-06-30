@@ -29,6 +29,16 @@ pip install -U "pillow==11.3.0"
 pip install torch torchvision
 pip install fastapi uvicorn pydantic
 
+# Download the CuTR model checkpoint.
+mkdir -p "$CUBIFY_REPO/models"
+MODEL_PATH="$CUBIFY_REPO/models/cutr_rgb.pth"
+if [ ! -f "$MODEL_PATH" ]; then
+    echo "Downloading cutr_rgb.pth..."
+    curl -L "https://ml-site.cdn-apple.com/models/cutr/cutr_rgb.pth" -o "$MODEL_PATH"
+else
+    echo "cutr_rgb.pth already present, skipping download."
+fi
+
 echo ""
 echo "Setup complete. Activate with: conda activate Cubify"
-echo "CUBIFY_REPO=$CUBIFY_REPO  (export this before running cutr_api.py)"
+echo "CUBIFY_REPO=$CUBIFY_REPO"
