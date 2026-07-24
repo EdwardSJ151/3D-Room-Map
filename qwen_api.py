@@ -303,9 +303,21 @@ def _load_vectorstore(job_id: str) -> Tuple[Any, List[Dict[str, Any]]]:
 # API models
 # ----------------------------
 
+class ObjectCropInput(BaseModel):
+    idx: int
+    image_base64: str
+
+
 class QwenRunRequest(BaseModel):
     job_id: str = Field(..., description="Job id from the CuTR run (reused here).")
-    image_base64: str = Field(..., description="Original full image, base64.")
+    image_base64: Optional[str] = Field(
+        default=None,
+        description="Original full image, base64 (legacy single-view flow).",
+    )
+    object_crops: Optional[List[ObjectCropInput]] = Field(
+        default=None,
+        description="Preselected per-object crops for multiview jobs.",
+    )
     pred: Dict[str, Any] = Field(..., description="The pred dict returned by CuTR (contains 'detections').")
 
 
@@ -364,16 +376,42 @@ async def run_qwen(req: QwenRunRequest):
     d.mkdir(parents=True, exist_ok=True)
 
     # Persist inputs (mirrors cutr_api behavior).
-    (d / "input.png").write_bytes(base64.b64decode(req.image_base64))
     (d / "pred.json").write_text(json.dumps(req.pred, indent=2))
 
-    img = Image.open(d / "input.png").convert("RGB")
     detections = req.pred.get("detections") or []
     if not detections:
         raise HTTPException(status_code=400, detail="pred.detections is empty")
 
     _t_crop0 = time.perf_counter()
-    crops = save_detection_crops(img, detections, d / "crops")
+    if req.object_crops:
+        crops_dir = d / "crops"
+        crops_dir.mkdir(parents=True, exist_ok=True)
+        crops = []
+        seen = set()
+        for item in req.object_crops:
+            if item.idx in seen or item.idx < 0 or item.idx >= len(detections):
+                raise HTTPException(status_code=400, detail=f"Invalid or duplicate crop idx={item.idx}")
+            try:
+                crop = Image.open(BytesIO(base64.b64decode(item.image_base64))).convert("RGB")
+                crop.load()
+            except Exception as exc:
+                raise HTTPException(status_code=400, detail=f"Invalid crop idx={item.idx}: {exc}") from exc
+            if crop.width < 2 or crop.height < 2:
+                raise HTTPException(status_code=400, detail=f"Crop idx={item.idx} is too small")
+            crop.save(crops_dir / f"{item.idx}.jpg", format="JPEG", quality=90)
+            crops.append((item.idx, crop))
+            seen.add(item.idx)
+    elif req.image_base64:
+        try:
+            image_bytes = base64.b64decode(req.image_base64)
+            (d / "input.png").write_bytes(image_bytes)
+            img = Image.open(BytesIO(image_bytes)).convert("RGB")
+            img.load()
+        except Exception as exc:
+            raise HTTPException(status_code=400, detail=f"Invalid image_base64: {exc}") from exc
+        crops = save_detection_crops(img, detections, d / "crops")
+    else:
+        raise HTTPException(status_code=400, detail="Provide image_base64 or object_crops")
     crop_generation_time_s = time.perf_counter() - _t_crop0
 
     if not crops:

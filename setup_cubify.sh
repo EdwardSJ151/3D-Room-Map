@@ -39,6 +39,14 @@ else
     echo "cutr_rgb.pth already present, skipping download."
 fi
 
+RGBD_MODEL_PATH="$CUBIFY_REPO/models/cutr_rgbd.pth"
+if [ ! -f "$RGBD_MODEL_PATH" ]; then
+    echo "Downloading cutr_rgbd.pth..."
+    curl -L "https://ml-site.cdn-apple.com/models/cutr/cutr_rgbd.pth" -o "$RGBD_MODEL_PATH"
+else
+    echo "cutr_rgbd.pth already present, skipping download."
+fi
+
 echo ""
 echo "Setup complete. Activate with: conda activate Cubify"
 echo "CUBIFY_REPO=$CUBIFY_REPO"

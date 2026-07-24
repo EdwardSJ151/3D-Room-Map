@@ -17,6 +17,9 @@ export CUBIFY_REPO=/your/path/ml-cubifyanything   # before running setup_cubify.
 
 Endpoints:
 - `POST /cutr/jobs` — `{image_base64, meta_json, score_thresh?, max_edge?, device?, model_path?}` → `{job_id}`
+- `POST /cutr/multiview/sessions` — create a collecting RGB-D session.
+- `PUT /cutr/multiview/sessions/{job_id}/frames/{frame_id}` — idempotently upload RGB metadata and optional gzip/uint16-mm depth.
+- `POST /cutr/multiview/sessions/{job_id}/finalize` — queue a 3–12 frame session for RGB-D inference/fusion; it falls back to RGB when fewer than three valid depth frames exist.
 - `GET  /cutr/jobs/{job_id}` — `{status, error?}`
 - `GET  /cutr/jobs/{job_id}/download` — zip with `pred.json`, `input.png`, `meta.json`, `run.log`
 
@@ -49,7 +52,7 @@ uvicorn qwen_api:app --host 0.0.0.0 --port 8091 --workers 1
 ```
 
 Endpoints:
-- `POST /qwen/jobs` — `{job_id, image_base64, pred}` → returns JSONL of `{idx, tag}`; builds the vectorstore in the background.
+- `POST /qwen/jobs` — legacy `{job_id, image_base64, pred}` or multiview `{job_id, object_crops, pred}` → returns JSONL of `{idx, tag}`; builds the vectorstore in the background.
 - `GET  /qwen/jobs/{job_id}/vectorstore` — `{status, n?, error?}`
 - `POST /qwen/query` — `{job_id, query, top_k?}` → top-k matches.
 
@@ -78,6 +81,8 @@ Endpoints (ADK standard):
 ## Env vars (optional)
 - `CUBIFY_REPO` — path to `ml-cubifyanything` clone (default `./ml-cubifyanything`)
 - `CUTR_MODEL_PATH` — path to `cutr_rgb.pth` (default `$CUBIFY_REPO/models/cutr_rgb.pth`)
+- `CUTR_RGBD_MODEL_PATH` — path to `cutr_rgbd.pth` (default `$CUBIFY_REPO/models/cutr_rgbd.pth`)
+- `CUTR_TO_UNITY_BASIS` — optional row-major 3×3 camera-basis override; defaults to `1,0,0,0,-1,0,0,0,1`.
 - `CUTR_JOBS_DIR` / `QWEN_JOBS_DIR` — output folders (default `cutr_jobs/`, `qwen_jobs/`)
 - `VLLM_BASE`, `VLLM_MODEL` — vLLM endpoint (defaults `http://localhost:8010/v1`, `MY_MODEL`)
 - `QWEN_EMBED_MODEL` — embedding model id (default `Qwen/Qwen3-Embedding-0.6B`)
