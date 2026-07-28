@@ -430,6 +430,30 @@ def _run_multiview_job(job_id: str, req: MultiFinalizeRequest) -> None:
                         f"object_{index}_observations={len(cluster.observations)}"
                         for index, cluster in enumerate(clusters)
                     ],
+                    *[
+                        (
+                            f"object_{index}_orientation="
+                            f"mode:{representative.orientation_mode},"
+                            f"accepted:{representative.orientation_observations},"
+                            f"rejected:{representative.orientation_rejected},"
+                            f"dispersion_deg:{representative.orientation_dispersion_deg:.3f},"
+                            f"raw_tilt_deg:{representative.raw_tilt_deg:.3f},"
+                            f"final_tilt_deg:{representative.final_tilt_deg:.3f},"
+                            f"accepted_frames:{'|'.join(representative.orientation_accepted_frames)},"
+                            f"rejected_frames:{'|'.join(representative.orientation_rejected_frames)}"
+                        )
+                        for index, representative in enumerate(representatives)
+                    ],
+                    *[
+                        (
+                            f"object_{object_index}_frame_{observation.frame_id}="
+                            f"camera_pitch_deg:{observation.camera_pitch_deg:.3f},"
+                            f"raw_tilt_deg:{observation.raw_tilt_deg:.3f},"
+                            f"score:{observation.score:.4f}"
+                        )
+                        for object_index, cluster in enumerate(clusters)
+                        for observation in cluster.observations
+                    ],
                 ]
             )
             + "\n",

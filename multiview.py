@@ -151,6 +151,15 @@ class Observation:
     rotation: np.ndarray
     score: float
     image_size: Tuple[int, int]
+    camera_pitch_deg: float = 0.0
+    orientation_mode: str = "raw"
+    orientation_observations: int = 1
+    orientation_rejected: int = 0
+    orientation_dispersion_deg: float = 0.0
+    raw_tilt_deg: float = 0.0
+    final_tilt_deg: float = 0.0
+    orientation_accepted_frames: List[str] = field(default_factory=list)
+    orientation_rejected_frames: List[str] = field(default_factory=list)
 
     @property
     def diagonal(self) -> float:
@@ -179,6 +188,10 @@ def predictions_to_world(
     count = min(len(detections), len(centers), len(dimensions), len(rotations))
     pose = camera_to_world(rgb_meta)
     basis = _basis_from_env(basis_value)
+    camera_forward = pose[:3, 2]
+    camera_pitch_deg = math.degrees(
+        math.asin(float(np.clip(camera_forward[1], -1.0, 1.0)))
+    )
     observations: List[Observation] = []
     for index in range(count):
         center_camera = _vector3(centers[index], f"center[{index}]")
@@ -201,9 +214,292 @@ def predictions_to_world(
                 rotation=rotation_world,
                 score=float(detections[index].get("score", 0.0)),
                 image_size=image_size,
+                camera_pitch_deg=camera_pitch_deg,
+                raw_tilt_deg=_vertical_tilt_deg(rotation_world),
+                final_tilt_deg=_vertical_tilt_deg(rotation_world),
             )
         )
     return observations
+
+
+_WORLD_UP = np.asarray([0.0, 1.0, 0.0], dtype=np.float64)
+_UPRIGHT_TILT_DEG = 25.0
+_UPRIGHT_CONSENSUS = 0.60
+_ORIENTATION_OUTLIER_DEG = 30.0
+
+
+def _rotation_angle_deg(a: np.ndarray, b: np.ndarray) -> float:
+    cosine = (float(np.trace(a.T @ b)) - 1.0) / 2.0
+    return math.degrees(math.acos(float(np.clip(cosine, -1.0, 1.0))))
+
+
+def _vertical_tilt_deg(rotation: np.ndarray) -> float:
+    alignment = float(np.max(np.abs(rotation.T @ _WORLD_UP)))
+    return math.degrees(math.acos(float(np.clip(alignment, -1.0, 1.0))))
+
+
+def _observation_weight(observation: Observation) -> float:
+    # A close, high-confidence observation should count more, without allowing
+    # an extreme close-up to completely dominate the remaining views.
+    area = float(np.clip(observation.bbox_area_ratio, 1e-4, 0.50))
+    return max(0.01, observation.score) * math.sqrt(area)
+
+
+def _upright_geometry(observation: Observation) -> Tuple[np.ndarray, np.ndarray]:
+    """Return an equivalent OBB with +Y as its vertical local axis.
+
+    The longest of the two horizontal axes becomes local X. An OBB is
+    invariant to axis sign and to swapping equivalent local axes, so this
+    canonical form removes the most common 90/180-degree ambiguities.
+    """
+    rotation = observation.rotation
+    dims = observation.dims
+    vertical_index = int(np.argmax(np.abs(rotation.T @ _WORLD_UP)))
+    horizontal_indices = [index for index in range(3) if index != vertical_index]
+    x_index = max(horizontal_indices, key=lambda index: float(dims[index]))
+
+    x_axis = rotation[:, x_index].copy()
+    x_axis -= float(x_axis @ _WORLD_UP) * _WORLD_UP
+    norm = float(np.linalg.norm(x_axis))
+    if norm < 1e-8:
+        x_axis = np.asarray([1.0, 0.0, 0.0], dtype=np.float64)
+    else:
+        x_axis /= norm
+    z_axis = np.cross(x_axis, _WORLD_UP)
+    z_axis /= max(1e-8, float(np.linalg.norm(z_axis)))
+    upright_rotation = np.column_stack((x_axis, _WORLD_UP, z_axis))
+
+    z_index = next(
+        index for index in horizontal_indices if index != x_index
+    )
+    upright_dims = np.asarray(
+        [dims[x_index], dims[vertical_index], dims[z_index]],
+        dtype=np.float64,
+    )
+    return upright_rotation, upright_dims
+
+
+def _line_angle_difference_deg(a: float, b: float) -> float:
+    delta = (a - b + math.pi / 2.0) % math.pi - math.pi / 2.0
+    return abs(math.degrees(delta))
+
+
+def _weighted_line_mean(angles: np.ndarray, weights: np.ndarray) -> float:
+    x = float(np.sum(weights * np.cos(2.0 * angles)))
+    y = float(np.sum(weights * np.sin(2.0 * angles)))
+    if abs(x) + abs(y) < 1e-12:
+        return float(angles[int(np.argmax(weights))])
+    return 0.5 * math.atan2(y, x)
+
+
+def _proper_axis_transforms() -> List[np.ndarray]:
+    transforms: List[np.ndarray] = []
+    for permutation in (
+        (0, 1, 2),
+        (0, 2, 1),
+        (1, 0, 2),
+        (1, 2, 0),
+        (2, 0, 1),
+        (2, 1, 0),
+    ):
+        for signs in (
+            (-1.0, -1.0, -1.0),
+            (-1.0, -1.0, 1.0),
+            (-1.0, 1.0, -1.0),
+            (-1.0, 1.0, 1.0),
+            (1.0, -1.0, -1.0),
+            (1.0, -1.0, 1.0),
+            (1.0, 1.0, -1.0),
+            (1.0, 1.0, 1.0),
+        ):
+            transform = np.zeros((3, 3), dtype=np.float64)
+            for new_axis, old_axis in enumerate(permutation):
+                transform[old_axis, new_axis] = signs[new_axis]
+            if np.linalg.det(transform) > 0.5:
+                transforms.append(transform)
+    return transforms
+
+
+_AXIS_TRANSFORMS = _proper_axis_transforms()
+
+
+def _align_geometry(
+    rotation: np.ndarray,
+    dims: np.ndarray,
+    reference: np.ndarray,
+) -> Tuple[np.ndarray, np.ndarray, float]:
+    best: Optional[Tuple[np.ndarray, np.ndarray, float]] = None
+    for transform in _AXIS_TRANSFORMS:
+        candidate_rotation = rotation @ transform
+        angle = _rotation_angle_deg(candidate_rotation, reference)
+        candidate_dims = np.abs(transform).T @ dims
+        if best is None or angle < best[2]:
+            best = (candidate_rotation, candidate_dims, angle)
+    assert best is not None
+    return best
+
+
+def _projected_bounds(
+    observation: Observation,
+    final_rotation: np.ndarray,
+) -> Tuple[np.ndarray, np.ndarray]:
+    signs = np.asarray(
+        [
+            [-1.0, -1.0, -1.0],
+            [-1.0, -1.0, 1.0],
+            [-1.0, 1.0, -1.0],
+            [-1.0, 1.0, 1.0],
+            [1.0, -1.0, -1.0],
+            [1.0, -1.0, 1.0],
+            [1.0, 1.0, -1.0],
+            [1.0, 1.0, 1.0],
+        ],
+        dtype=np.float64,
+    )
+    corners = observation.center + (signs * (observation.dims / 2.0)) @ observation.rotation.T
+    local_corners = corners @ final_rotation
+    return np.min(local_corners, axis=0), np.max(local_corners, axis=0)
+
+
+def _refit_geometry(
+    observations: List[Observation],
+    weights: np.ndarray,
+    final_rotation: np.ndarray,
+) -> Tuple[np.ndarray, np.ndarray]:
+    weights = weights / weights.sum()
+    minima: List[np.ndarray] = []
+    maxima: List[np.ndarray] = []
+    for observation in observations:
+        minimum, maximum = _projected_bounds(observation, final_rotation)
+        minima.append(minimum)
+        maxima.append(maximum)
+    lower = np.average(np.asarray(minima), axis=0, weights=weights)
+    upper = np.average(np.asarray(maxima), axis=0, weights=weights)
+    local_center = (lower + upper) / 2.0
+    return final_rotation @ local_center, np.maximum(upper - lower, 1e-4)
+
+
+def _fuse_upright(
+    observations: List[Observation],
+) -> Tuple[np.ndarray, np.ndarray, np.ndarray, List[int], float]:
+    canonical = [_upright_geometry(item) for item in observations]
+    angles = np.asarray(
+        [math.atan2(rotation[2, 0], rotation[0, 0]) for rotation, _ in canonical]
+    )
+    weights = np.asarray([_observation_weight(item) for item in observations])
+
+    medoid_index = min(
+        range(len(observations)),
+        key=lambda index: float(
+            np.sum(
+                weights
+                * np.asarray(
+                    [
+                        _line_angle_difference_deg(angles[index], angle)
+                        for angle in angles
+                    ]
+                )
+            )
+        ),
+    )
+    accepted = [
+        index
+        for index, angle in enumerate(angles)
+        if _line_angle_difference_deg(angle, angles[medoid_index])
+        <= _ORIENTATION_OUTLIER_DEG
+    ]
+    accepted_angles = angles[accepted]
+    accepted_weights = weights[accepted]
+    yaw = _weighted_line_mean(accepted_angles, accepted_weights)
+    x_axis = np.asarray([math.cos(yaw), 0.0, math.sin(yaw)])
+    final_rotation = np.column_stack(
+        (x_axis, _WORLD_UP, np.cross(x_axis, _WORLD_UP))
+    )
+
+    accepted_observations = [observations[index] for index in accepted]
+    center, dims = _refit_geometry(
+        accepted_observations,
+        accepted_weights,
+        final_rotation,
+    )
+    differences = np.asarray(
+        [_line_angle_difference_deg(angle, yaw) for angle in accepted_angles]
+    )
+    dispersion = float(
+        math.sqrt(np.average(differences * differences, weights=accepted_weights))
+    )
+    return center, dims, final_rotation, accepted, dispersion
+
+
+def _fuse_free_3d(
+    observations: List[Observation],
+) -> Tuple[np.ndarray, np.ndarray, np.ndarray, List[int], float]:
+    weights = np.asarray([_observation_weight(item) for item in observations])
+    pairwise = np.zeros((len(observations), len(observations)), dtype=np.float64)
+    for row, observation in enumerate(observations):
+        for column, reference in enumerate(observations):
+            _, _, pairwise[row, column] = _align_geometry(
+                observation.rotation,
+                observation.dims,
+                reference.rotation,
+            )
+    medoid_index = min(
+        range(len(observations)),
+        key=lambda index: float(np.sum(weights * pairwise[:, index])),
+    )
+    reference = observations[medoid_index].rotation
+    aligned = [
+        _align_geometry(item.rotation, item.dims, reference)
+        for item in observations
+    ]
+    accepted = [
+        index
+        for index, (_, _, angle) in enumerate(aligned)
+        if angle <= _ORIENTATION_OUTLIER_DEG
+    ]
+    accepted_weights = weights[accepted]
+    rotation_sum = sum(
+        (
+            accepted_weights[offset] * aligned[index][0]
+            for offset, index in enumerate(accepted)
+        ),
+        np.zeros((3, 3), dtype=np.float64),
+    )
+    u, _, vt = np.linalg.svd(rotation_sum)
+    final_rotation = u @ vt
+    if np.linalg.det(final_rotation) < 0:
+        u[:, -1] *= -1
+        final_rotation = u @ vt
+
+    normalized_observations: List[Observation] = []
+    for index in accepted:
+        item = observations[index]
+        normalized_observations.append(
+            Observation(
+                frame_id=item.frame_id,
+                detection=item.detection,
+                center=item.center,
+                dims=aligned[index][1],
+                rotation=aligned[index][0],
+                score=item.score,
+                image_size=item.image_size,
+            )
+        )
+    center, dims = _refit_geometry(
+        normalized_observations,
+        accepted_weights,
+        final_rotation,
+    )
+    differences = np.asarray(
+        [
+            _rotation_angle_deg(aligned[index][0], final_rotation)
+            for index in accepted
+        ]
+    )
+    dispersion = float(
+        math.sqrt(np.average(differences * differences, weights=accepted_weights))
+    )
+    return center, dims, final_rotation, accepted, dispersion
 
 
 def _aabb(obs: Observation) -> Tuple[np.ndarray, np.ndarray]:
@@ -228,32 +524,119 @@ class Cluster:
     observations: List[Observation] = field(default_factory=list)
 
     def fused(self) -> Observation:
-        weights = np.asarray([max(0.01, item.score) for item in self.observations])
-        weights /= weights.sum()
-        center = sum((weight * item.center for weight, item in zip(weights, self.observations)), np.zeros(3))
-        dims = sum((weight * item.dims for weight, item in zip(weights, self.observations)), np.zeros(3))
         representative = max(
             self.observations,
             key=lambda item: (item.score, item.bbox_area_ratio),
         )
+        if len(self.observations) == 1:
+            return Observation(
+                frame_id=representative.frame_id,
+                detection=dict(representative.detection),
+                center=representative.center.copy(),
+                dims=representative.dims.copy(),
+                rotation=representative.rotation.copy(),
+                score=representative.score,
+                image_size=representative.image_size,
+                camera_pitch_deg=representative.camera_pitch_deg,
+                orientation_mode="single_view",
+                orientation_observations=1,
+                raw_tilt_deg=_vertical_tilt_deg(representative.rotation),
+                final_tilt_deg=_vertical_tilt_deg(representative.rotation),
+                orientation_accepted_frames=[representative.frame_id],
+            )
+
+        upright_count = sum(
+            _vertical_tilt_deg(item.rotation) <= _UPRIGHT_TILT_DEG
+            for item in self.observations
+        )
+        upright_consensus = (
+            upright_count / len(self.observations) >= _UPRIGHT_CONSENSUS
+        )
+        if upright_consensus:
+            eligible = [
+                item
+                for item in self.observations
+                if _vertical_tilt_deg(item.rotation) <= _UPRIGHT_TILT_DEG
+            ]
+            center, dims, rotation, accepted_indices, dispersion = _fuse_upright(
+                eligible
+            )
+            accepted = [eligible[index] for index in accepted_indices]
+            mode = "gravity_aligned"
+            rejected = len(self.observations) - len(accepted)
+        else:
+            center, dims, rotation, accepted_indices, dispersion = _fuse_free_3d(
+                self.observations
+            )
+            accepted = [self.observations[index] for index in accepted_indices]
+            mode = "free_3d"
+            rejected = len(self.observations) - len(accepted)
+
+        representative = max(
+            accepted,
+            key=lambda item: (item.score, item.bbox_area_ratio),
+        )
+        raw_weights = np.asarray([_observation_weight(item) for item in accepted])
+        raw_tilt = float(
+            np.average(
+                [_vertical_tilt_deg(item.rotation) for item in accepted],
+                weights=raw_weights,
+            )
+        )
+        accepted_frame_ids = {item.frame_id for item in accepted}
         return Observation(
             frame_id=representative.frame_id,
             detection=dict(representative.detection),
             center=center,
             dims=dims,
-            rotation=representative.rotation,
+            rotation=rotation,
             score=representative.score,
             image_size=representative.image_size,
+            camera_pitch_deg=representative.camera_pitch_deg,
+            orientation_mode=mode,
+            orientation_observations=len(accepted),
+            orientation_rejected=rejected,
+            orientation_dispersion_deg=dispersion,
+            raw_tilt_deg=raw_tilt,
+            final_tilt_deg=_vertical_tilt_deg(rotation),
+            orientation_accepted_frames=[item.frame_id for item in accepted],
+            orientation_rejected_frames=[
+                item.frame_id
+                for item in self.observations
+                if item.frame_id not in accepted_frame_ids
+            ],
         )
 
 
+def _matching_observation(observation: Observation) -> Observation:
+    if _vertical_tilt_deg(observation.rotation) > _UPRIGHT_TILT_DEG:
+        return observation
+    rotation, dims = _upright_geometry(observation)
+    return Observation(
+        frame_id=observation.frame_id,
+        detection=observation.detection,
+        center=observation.center,
+        dims=dims,
+        rotation=rotation,
+        score=observation.score,
+        image_size=observation.image_size,
+    )
+
+
 def _compatible(candidate: Observation, reference: Observation) -> Tuple[bool, float]:
-    ratios = np.maximum(candidate.dims / reference.dims, reference.dims / candidate.dims)
+    candidate_match = _matching_observation(candidate)
+    reference_match = _matching_observation(reference)
+    candidate_dims = np.sort(candidate_match.dims)
+    reference_dims = np.sort(reference_match.dims)
+    ratios = np.maximum(
+        candidate_dims / reference_dims,
+        reference_dims / candidate_dims,
+    )
     if np.any(ratios > 2.0):
         return False, math.inf
     distance = float(np.linalg.norm(candidate.center - reference.center))
     threshold = max(0.35, 0.30 * min(candidate.diagonal, reference.diagonal))
-    iou = _aabb_iou(candidate, reference)
+    iou = _aabb_iou(candidate_match, reference_match)
     accepted = iou >= 0.05 or distance <= threshold
     cost = distance / max(threshold, 1e-6) + (1.0 - iou)
     return accepted, cost
@@ -302,6 +685,20 @@ def build_fused_prediction(
         detection["source_bbox_xyxy"] = list(detection.get("bbox_xyxy") or [])
         detection["observation_count"] = len(cluster.observations)
         detection["inference_mode"] = inference_mode
+        detection["orientation_mode"] = fused.orientation_mode
+        detection["orientation_observations"] = fused.orientation_observations
+        detection["orientation_rejected"] = fused.orientation_rejected
+        detection["orientation_dispersion_deg"] = round(
+            fused.orientation_dispersion_deg, 3
+        )
+        detection["orientation_raw_tilt_deg"] = round(fused.raw_tilt_deg, 3)
+        detection["orientation_final_tilt_deg"] = round(fused.final_tilt_deg, 3)
+        detection["orientation_accepted_frames"] = list(
+            fused.orientation_accepted_frames
+        )
+        detection["orientation_rejected_frames"] = list(
+            fused.orientation_rejected_frames
+        )
         detections.append(detection)
         centers.append(fused.center.astype(float).tolist())
         dims.append(fused.dims.astype(float).tolist())
