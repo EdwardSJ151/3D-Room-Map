@@ -17,6 +17,7 @@ from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
+import numpy as np
 from fastapi import FastAPI, HTTPException
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
@@ -25,6 +26,7 @@ from crop_utils import crop_for_detection, save_detection_crops
 from multiview import (
     build_fused_prediction,
     camera_to_world,
+    depth_coverage_ratio,
     decode_depth_mm,
     fuse_observations,
     predictions_to_world,
@@ -124,6 +126,11 @@ JOB_RUNNING = "running"
 JOB_DONE = "done"
 JOB_ERROR = "error"
 JOB_COLLECTING = "collecting"
+JOB_NEEDS_MORE_COVERAGE = "needs_more_coverage"
+
+MIN_RGBD_COVERAGE = 0.15
+MIN_VIEW_TRANSLATION_M = 0.35
+MIN_VIEW_ROTATION_DEG = 20.0
 
 _jobs_lock = threading.Lock()
 _jobs: Dict[str, Dict[str, Any]] = {}
@@ -222,6 +229,23 @@ class JobStatus(BaseModel):
     uploaded_frames: Optional[int] = None
     processed_frames: Optional[int] = None
     num_detections: Optional[int] = None
+    inference_mode: Optional[str] = None
+    guidance: Optional[str] = None
+
+
+class FrameQuality(BaseModel):
+    accepted: bool
+    depth_coverage_ratio: float = 0.0
+    nearest_translation_m: Optional[float] = None
+    nearest_rotation_deg: Optional[float] = None
+    guidance: Optional[str] = None
+
+
+class FrameUploadResponse(BaseModel):
+    job_id: str
+    frame_id: str
+    uploaded_frames: int
+    quality: FrameQuality
 
 
 # App
@@ -251,12 +275,76 @@ def _make_intrinsics(mods: Dict[str, Any], meta: Dict[str, Any], width: int, hei
         return None
     if not all(value is not None and float(value) == float(value) for value in values):
         raise ValueError("fx, fy, cx and cy must all be finite when supplied")
+    source_width = int(meta.get("width") or width)
+    source_height = int(meta.get("height") or height)
+    if source_width <= 0 or source_height <= 0:
+        raise ValueError("metadata width and height must be positive")
     matrix = mods["make_default_intrinsics"](width, height)
-    matrix[0, 0] = float(meta["fx"])
-    matrix[1, 1] = float(meta["fy"])
-    matrix[0, 2] = float(meta["cx"])
-    matrix[1, 2] = float(meta["cy"])
+    scale_x = width / source_width
+    scale_y = height / source_height
+    matrix[0, 0] = float(meta["fx"]) * scale_x
+    matrix[1, 1] = float(meta["fy"]) * scale_y
+    matrix[0, 2] = float(meta["cx"]) * scale_x
+    matrix[1, 2] = float(meta["cy"]) * scale_y
     return matrix
+
+
+def _camera_rotation_delta_deg(a: Dict[str, Any], b: Dict[str, Any]) -> float:
+    rotation_a = camera_to_world(a)[:3, :3]
+    rotation_b = camera_to_world(b)[:3, :3]
+    relative = rotation_a.T @ rotation_b
+    cosine = (float(relative.trace()) - 1.0) / 2.0
+    return math.degrees(math.acos(max(-1.0, min(1.0, cosine))))
+
+
+def _view_quality(
+    meta: Dict[str, Any],
+    aligned_depth_mm,
+    prior_metas: List[Dict[str, Any]],
+) -> FrameQuality:
+    coverage = depth_coverage_ratio(aligned_depth_mm)
+    if coverage < MIN_RGBD_COVERAGE:
+        return FrameQuality(
+            accepted=False,
+            depth_coverage_ratio=coverage,
+            guidance=(
+                "Depth coverage is too low. Look at textured room surfaces, "
+                "wait for environment depth, and capture again."
+            ),
+        )
+    if not prior_metas:
+        return FrameQuality(accepted=True, depth_coverage_ratio=coverage)
+
+    position = camera_to_world(meta)[:3, 3]
+    distances = [
+        float(np.linalg.norm(position - camera_to_world(previous)[:3, 3]))
+        for previous in prior_metas
+    ]
+    rotations = [_camera_rotation_delta_deg(meta, previous) for previous in prior_metas]
+    nearest_translation = min(distances)
+    nearest_rotation = min(rotations)
+    diverse = any(
+        distance >= MIN_VIEW_TRANSLATION_M or rotation >= MIN_VIEW_ROTATION_DEG
+        for distance, rotation in zip(distances, rotations)
+    )
+    if not diverse:
+        return FrameQuality(
+            accepted=False,
+            depth_coverage_ratio=coverage,
+            nearest_translation_m=nearest_translation,
+            nearest_rotation_deg=nearest_rotation,
+            guidance=(
+                "This view is too similar to an accepted frame. Move at least "
+                f"{MIN_VIEW_TRANSLATION_M:.2f} m or turn at least "
+                f"{MIN_VIEW_ROTATION_DEG:.0f} degrees, then capture again."
+            ),
+        )
+    return FrameQuality(
+        accepted=True,
+        depth_coverage_ratio=coverage,
+        nearest_translation_m=nearest_translation,
+        nearest_rotation_deg=nearest_rotation,
+    )
 
 
 def _frame_dirs(job_dir: Path) -> List[Path]:
@@ -317,6 +405,7 @@ def _run_multiview_job(job_id: str, req: MultiFinalizeRequest) -> None:
         rgbd_frames: List[Dict[str, Any]] = []
         for frame in frames:
             if frame["depth_mm"] is None:
+                frame["depth_error"] = "metric depth is required for spatial mapping"
                 continue
             image: Image.Image = frame["image"]
             try:
@@ -332,14 +421,62 @@ def _run_multiview_job(job_id: str, req: MultiFinalizeRequest) -> None:
             if not validate_depth(aligned):
                 frame["depth_error"] = "reprojected depth has insufficient valid coverage"
                 continue
+            coverage = depth_coverage_ratio(aligned)
+            frame["depth_coverage_ratio"] = coverage
+            if coverage < MIN_RGBD_COVERAGE:
+                frame["depth_error"] = (
+                    f"reprojected depth coverage {coverage:.3f} is below "
+                    f"{MIN_RGBD_COVERAGE:.2f}"
+                )
+                continue
             frame["aligned_depth_mm"] = aligned
             save_depth_png(aligned, frame["dir"] / "depth_aligned.png")
             rgbd_frames.append(frame)
 
-        use_rgbd = len(rgbd_frames) >= 3
-        selected_frames = rgbd_frames if use_rgbd else frames
-        inference_mode = "rgbd" if use_rgbd else "rgb"
-        model_path = req.rgbd_model_path if use_rgbd else req.rgb_model_path
+        if len(rgbd_frames) < 3 or len(rgbd_frames) != len(frames):
+            guidance = (
+                "Every accepted frame needs aligned metric depth with at least "
+                f"{MIN_RGBD_COVERAGE:.0%} coverage. Capture another view after "
+                "environment depth has stabilized."
+            )
+            manifest = {
+                "job_id": job_id,
+                "inference_mode": "rgbd",
+                "uploaded_frames": len(frames),
+                "processed_frames": 0,
+                "valid_depth_frames": len(rgbd_frames),
+                "guidance": guidance,
+                "frames": [
+                    {
+                        "frame_id": frame["id"],
+                        "has_depth": frame["depth_mm"] is not None,
+                        "used_for_inference": False,
+                        "depth_coverage_ratio": frame.get("depth_coverage_ratio", 0.0),
+                        "depth_error": frame.get("depth_error"),
+                    }
+                    for frame in frames
+                ],
+            }
+            write_manifest(job_dir / "manifest.json", manifest)
+            log_path.write_text(guidance + "\n", encoding="utf-8")
+            _job_set(
+                job_id,
+                status=JOB_NEEDS_MORE_COVERAGE,
+                processed_frames=0,
+                guidance=guidance,
+            )
+            _persist_status(
+                job_id,
+                JOB_NEEDS_MORE_COVERAGE,
+                uploaded_frames=len(frames),
+                processed_frames=0,
+                guidance=guidance,
+            )
+            return
+
+        selected_frames = rgbd_frames
+        inference_mode = "rgbd"
+        model_path = req.rgbd_model_path
         runner = _get_runner(model_path, req.device)
         mods = _load_cutr()
         max_edge = None if int(req.max_edge or 0) <= 0 else int(req.max_edge)
@@ -349,9 +486,7 @@ def _run_multiview_job(job_id: str, req: MultiFinalizeRequest) -> None:
         for processed, frame in enumerate(selected_frames, start=1):
             image = frame["image"]
             intrinsics = _make_intrinsics(mods, frame["meta"], image.width, image.height)
-            depth_m = None
-            if use_rgbd:
-                depth_m = frame["aligned_depth_mm"].astype("float32") / 1000.0
+            depth_m = frame["aligned_depth_mm"].astype("float32") / 1000.0
             started = time.perf_counter()
             pred = runner.infer(
                 image=image,
@@ -372,6 +507,7 @@ def _run_multiview_job(job_id: str, req: MultiFinalizeRequest) -> None:
                 frame["meta"],
                 image.size,
                 os.environ.get("CUTR_TO_UNITY_BASIS"),
+                frame["aligned_depth_mm"],
             )
             _job_set(job_id, processed_frames=processed)
             _persist_status(
@@ -411,6 +547,7 @@ def _run_multiview_job(job_id: str, req: MultiFinalizeRequest) -> None:
                     "has_depth": frame["depth_mm"] is not None,
                     "used_for_inference": frame["id"]
                     in {selected["id"] for selected in selected_frames},
+                    "depth_coverage_ratio": frame.get("depth_coverage_ratio", 0.0),
                     "depth_error": frame.get("depth_error"),
                 }
                 for frame in frames
@@ -439,8 +576,15 @@ def _run_multiview_job(job_id: str, req: MultiFinalizeRequest) -> None:
                             f"dispersion_deg:{representative.orientation_dispersion_deg:.3f},"
                             f"raw_tilt_deg:{representative.raw_tilt_deg:.3f},"
                             f"final_tilt_deg:{representative.final_tilt_deg:.3f},"
+                            f"localization:{representative.localization_mode},"
+                            f"depth_samples:{representative.depth_sample_count},"
+                            f"depth_coverage:{representative.depth_coverage_ratio:.3f},"
+                            f"depth_iqr_m:{representative.depth_iqr_m:.3f},"
+                            f"localization_confidence:{representative.localization_confidence:.3f},"
                             f"accepted_frames:{'|'.join(representative.orientation_accepted_frames)},"
-                            f"rejected_frames:{'|'.join(representative.orientation_rejected_frames)}"
+                            f"rejected_frames:{'|'.join(representative.orientation_rejected_frames)},"
+                            f"localization_accepted:{'|'.join(representative.localization_accepted_frames)},"
+                            f"localization_rejected:{'|'.join(representative.localization_rejected_frames)}"
                         )
                         for index, representative in enumerate(representatives)
                     ],
@@ -507,7 +651,10 @@ def create_multiview_session():
     return JobStartResponse(job_id=job_id)
 
 
-@app.put("/cutr/multiview/sessions/{job_id}/frames/{frame_id}")
+@app.put(
+    "/cutr/multiview/sessions/{job_id}/frames/{frame_id}",
+    response_model=FrameUploadResponse,
+)
 def upload_multiview_frame(job_id: str, frame_id: str, req: MultiFrameRequest):
     if not _FRAME_ID_RE.fullmatch(frame_id):
         raise HTTPException(status_code=400, detail="Invalid frame_id")
@@ -526,16 +673,32 @@ def upload_multiview_frame(job_id: str, frame_id: str, req: MultiFrameRequest):
             value = float(req.meta_json[key])
             if not math.isfinite(value):
                 raise ValueError(f"{key} must be finite")
-        if req.depth_base64 is not None:
-            if req.depth_meta is None:
-                raise ValueError("depth_meta is required with depth_base64")
-            depth = decode_depth_mm(req.depth_base64, req.depth_meta)
-            if not validate_depth(depth):
-                raise ValueError("depth has insufficient valid metric samples")
-            _ = req.depth_meta["projection_matrix"]
-            _ = req.depth_meta["camera_to_world"]
-    except (KeyError, TypeError, ValueError) as exc:
+        if req.depth_base64 is None or req.depth_meta is None:
+            raise ValueError("metric depth is required for a multiview mapping frame")
+        depth = decode_depth_mm(req.depth_base64, req.depth_meta)
+        if not validate_depth(depth):
+            raise ValueError("depth has insufficient valid metric samples")
+        _ = req.depth_meta["projection_matrix"]
+        _ = req.depth_meta["camera_to_world"]
+        aligned_depth = reproject_depth_to_rgb(
+            depth, req.depth_meta, req.meta_json, image.size
+        )
+        prior_metas = [
+            json.loads((path / "meta.json").read_text(encoding="utf-8"))
+            for path in _frame_dirs(_job_dir(job_id))
+            if path != frame_dir
+        ]
+        quality = _view_quality(req.meta_json, aligned_depth, prior_metas)
+    except (KeyError, TypeError, ValueError, np.linalg.LinAlgError) as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+    if not quality.accepted:
+        return FrameUploadResponse(
+            job_id=job_id,
+            frame_id=frame_id,
+            uploaded_frames=len(_frame_dirs(_job_dir(job_id))),
+            quality=quality,
+        )
 
     frame_dir.mkdir(parents=True, exist_ok=True)
     image.save(frame_dir / "input.jpg", format="JPEG", quality=90)
@@ -543,17 +706,13 @@ def upload_multiview_frame(job_id: str, frame_id: str, req: MultiFrameRequest):
         json.dumps(req.meta_json, indent=2),
         encoding="utf-8",
     )
-    if req.depth_base64 is not None and req.depth_meta is not None:
-        (frame_dir / "depth.bin.gz").write_bytes(
-            base64.b64decode(req.depth_base64, validate=True)
-        )
-        (frame_dir / "depth_meta.json").write_text(
-            json.dumps(req.depth_meta, indent=2),
-            encoding="utf-8",
-        )
-    else:
-        (frame_dir / "depth.bin.gz").unlink(missing_ok=True)
-        (frame_dir / "depth_meta.json").unlink(missing_ok=True)
+    (frame_dir / "depth.bin.gz").write_bytes(
+        base64.b64decode(req.depth_base64, validate=True)
+    )
+    (frame_dir / "depth_meta.json").write_text(
+        json.dumps(req.depth_meta, indent=2),
+        encoding="utf-8",
+    )
     uploaded_frames = len(_frame_dirs(_job_dir(job_id)))
     _job_set(job_id, uploaded_frames=uploaded_frames)
     _persist_status(
@@ -562,7 +721,12 @@ def upload_multiview_frame(job_id: str, frame_id: str, req: MultiFrameRequest):
         uploaded_frames=uploaded_frames,
         processed_frames=0,
     )
-    return {"job_id": job_id, "frame_id": frame_id, "uploaded_frames": uploaded_frames}
+    return FrameUploadResponse(
+        job_id=job_id,
+        frame_id=frame_id,
+        uploaded_frames=uploaded_frames,
+        quality=quality,
+    )
 
 
 @app.post("/cutr/multiview/sessions/{job_id}/finalize", response_model=JobStartResponse)
@@ -684,7 +848,15 @@ def job_status(job_id: str):
     job = _job_get(job_id)
     if not job:
         raise HTTPException(status_code=404, detail="Job not found")
-    return JobStatus(status=str(job.get("status", JOB_ERROR)), error=job.get("error"))
+    return JobStatus(
+        status=str(job.get("status", JOB_ERROR)),
+        error=job.get("error"),
+        uploaded_frames=job.get("uploaded_frames"),
+        processed_frames=job.get("processed_frames"),
+        num_detections=job.get("num_detections"),
+        inference_mode=job.get("inference_mode"),
+        guidance=job.get("guidance"),
+    )
 
 
 @app.get("/cutr/jobs/{job_id}/download")

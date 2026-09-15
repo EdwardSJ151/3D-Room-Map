@@ -63,6 +63,39 @@ def validate_depth(depth_mm: np.ndarray) -> bool:
     return valid.size >= max(64, int(depth_mm.size * 0.01))
 
 
+def depth_coverage_ratio(depth_mm: np.ndarray) -> float:
+    """Return the fraction of a depth image containing usable metric samples."""
+    if depth_mm.size == 0:
+        return 0.0
+    valid = (depth_mm >= 100) & (depth_mm <= 20_000)
+    return float(np.count_nonzero(valid) / depth_mm.size)
+
+
+def scaled_intrinsics(
+    rgb_meta: Dict[str, Any], rgb_size: Tuple[int, int]
+) -> Tuple[float, float, float, float]:
+    """Scale metadata intrinsics into the encoded RGB image's pixel space.
+
+    PassthroughCameraAccess can expose a sensor-sized calibration while an
+    application uploads a differently sized JPEG.  Keeping this conversion in
+    one place prevents a valid depth sample from being projected to the wrong
+    pixel (and, consequently, the wrong world position).
+    """
+    width, height = rgb_size
+    source_width = int(rgb_meta.get("width") or width)
+    source_height = int(rgb_meta.get("height") or height)
+    if source_width <= 0 or source_height <= 0:
+        raise ValueError("RGB metadata width and height must be positive")
+    scale_x = width / source_width
+    scale_y = height / source_height
+    return (
+        float(rgb_meta["fx"]) * scale_x,
+        float(rgb_meta["fy"]) * scale_y,
+        float(rgb_meta["cx"]) * scale_x,
+        float(rgb_meta["cy"]) * scale_y,
+    )
+
+
 def reproject_depth_to_rgb(
     depth_mm: np.ndarray,
     depth_meta: Dict[str, Any],
@@ -106,11 +139,8 @@ def reproject_depth_to_rgb(
     points_rgb = points_rgb[:, in_front]
     z = z[in_front]
 
-    fx = float(rgb_meta["fx"])
-    fy = float(rgb_meta["fy"])
-    cx = float(rgb_meta["cx"])
-    cy = float(rgb_meta["cy"])
     rgb_width, rgb_height = rgb_size
+    fx, fy, cx, cy = scaled_intrinsics(rgb_meta, rgb_size)
     u = np.rint(fx * points_rgb[0] / z + cx).astype(np.int64)
     v = np.rint(fy * points_rgb[1] / z + cy).astype(np.int64)
     inside = (u >= 0) & (u < rgb_width) & (v >= 0) & (v < rgb_height)
@@ -160,6 +190,13 @@ class Observation:
     final_tilt_deg: float = 0.0
     orientation_accepted_frames: List[str] = field(default_factory=list)
     orientation_rejected_frames: List[str] = field(default_factory=list)
+    localization_mode: str = "model_3d"
+    depth_sample_count: int = 0
+    depth_coverage_ratio: float = 0.0
+    depth_iqr_m: float = 0.0
+    localization_confidence: float = 0.0
+    localization_accepted_frames: List[str] = field(default_factory=list)
+    localization_rejected_frames: List[str] = field(default_factory=list)
 
     @property
     def diagonal(self) -> float:
@@ -173,12 +210,117 @@ class Observation:
         return max(0.0, x2 - x1) * max(0.0, y2 - y1) / max(1.0, width * height)
 
 
+@dataclass
+class DepthLocalization:
+    """A stable, measured visible point inside one 2D detection."""
+
+    pixel_x: float
+    pixel_y: float
+    depth_m: float
+    sample_count: int
+    coverage_ratio: float
+    iqr_m: float
+    confidence: float
+
+
+_BBOX_INSET_RATIO = 0.15
+_MIN_DEPTH_SAMPLES = 64
+_MIN_BBOX_DEPTH_COVERAGE = 0.08
+_MAX_DEPTH_IQR_M = 0.35
+
+
+def localize_detection_from_depth(
+    detection: Dict[str, Any], depth_mm: np.ndarray
+) -> Optional[DepthLocalization]:
+    """Find a coherent foreground depth patch inside a detection bbox.
+
+    A detector bbox often contains a wall or floor around an object.  Taking a
+    raw bbox average would pull a wardrobe or bed toward that background.  The
+    estimator therefore starts in the central region, uses its robust median as
+    a seed, then keeps only the similarly-deep samples from the bbox interior.
+    It deliberately returns ``None`` instead of inventing a 3D location when
+    depth is sparse or mixed.
+    """
+    bbox = detection.get("bbox_xyxy") or []
+    if len(bbox) != 4 or depth_mm.ndim != 2:
+        return None
+    image_height, image_width = depth_mm.shape
+    x1, y1, x2, y2 = (float(value) for value in bbox)
+    x1 = max(0, min(image_width - 1, math.floor(x1)))
+    x2 = max(x1 + 1, min(image_width, math.ceil(x2)))
+    y1 = max(0, min(image_height - 1, math.floor(y1)))
+    y2 = max(y1 + 1, min(image_height, math.ceil(y2)))
+    width, height = x2 - x1, y2 - y1
+    if width < 4 or height < 4:
+        return None
+
+    inset_x = max(1, int(round(width * _BBOX_INSET_RATIO)))
+    inset_y = max(1, int(round(height * _BBOX_INSET_RATIO)))
+    ix1, ix2 = x1 + inset_x, max(x1 + inset_x + 1, x2 - inset_x)
+    iy1, iy2 = y1 + inset_y, max(y1 + inset_y + 1, y2 - inset_y)
+    interior = depth_mm[iy1:iy2, ix1:ix2]
+    valid = (interior >= 100) & (interior <= 20_000)
+    valid_count = int(np.count_nonzero(valid))
+    interior_area = max(1, interior.size)
+    coverage = valid_count / interior_area
+    required_samples = max(_MIN_DEPTH_SAMPLES, int(interior_area * 0.03))
+    if valid_count < required_samples or coverage < _MIN_BBOX_DEPTH_COVERAGE:
+        return None
+
+    # The object is expected around the bbox centre.  The seed is intentionally
+    # taken from that area, not from a potentially dominant background wall.
+    center_x1 = ix1 + (ix2 - ix1) // 4
+    center_x2 = ix2 - (ix2 - ix1) // 4
+    center_y1 = iy1 + (iy2 - iy1) // 4
+    center_y2 = iy2 - (iy2 - iy1) // 4
+    central = depth_mm[center_y1:center_y2, center_x1:center_x2]
+    central_valid = central[(central >= 100) & (central <= 20_000)]
+    seed_values = central_valid if central_valid.size >= max(16, required_samples // 8) else interior[valid]
+    seed_mm = float(np.median(seed_values))
+    q1, q3 = np.percentile(seed_values, [25, 75])
+    # Keep the local foreground surface, while allowing ordinary depth noise
+    # and a gently slanted furniture face.
+    tolerance_mm = float(np.clip(max(80.0, 1.5 * (q3 - q1)), 80.0, 350.0))
+    selected = valid & (np.abs(interior.astype(np.float64) - seed_mm) <= tolerance_mm)
+    selected_count = int(np.count_nonzero(selected))
+    if selected_count < required_samples:
+        return None
+
+    ys, xs = np.nonzero(selected)
+    values_m = interior[ys, xs].astype(np.float64) / 1000.0
+    value_q1, value_q3 = np.percentile(values_m, [25, 75])
+    iqr_m = float(value_q3 - value_q1)
+    if iqr_m > _MAX_DEPTH_IQR_M:
+        return None
+    sample_x = float(np.median(xs + ix1))
+    sample_y = float(np.median(ys + iy1))
+    confidence = float(
+        np.clip(
+            min(1.0, selected_count / required_samples)
+            * min(1.0, coverage / _MIN_BBOX_DEPTH_COVERAGE)
+            * max(0.0, 1.0 - iqr_m / _MAX_DEPTH_IQR_M),
+            0.0,
+            1.0,
+        )
+    )
+    return DepthLocalization(
+        pixel_x=sample_x,
+        pixel_y=sample_y,
+        depth_m=float(np.median(values_m)),
+        sample_count=selected_count,
+        coverage_ratio=float(coverage),
+        iqr_m=iqr_m,
+        confidence=confidence,
+    )
+
+
 def predictions_to_world(
     frame_id: str,
     pred: Dict[str, Any],
     rgb_meta: Dict[str, Any],
     image_size: Tuple[int, int],
     basis_value: Optional[str] = None,
+    aligned_depth_mm: Optional[np.ndarray] = None,
 ) -> List[Observation]:
     detections = pred.get("detections") or []
     boxes = pred.get("boxes_3d") or {}
@@ -188,6 +330,9 @@ def predictions_to_world(
     count = min(len(detections), len(centers), len(dimensions), len(rotations))
     pose = camera_to_world(rgb_meta)
     basis = _basis_from_env(basis_value)
+    intrinsics: Optional[Tuple[float, float, float, float]] = None
+    if aligned_depth_mm is not None:
+        intrinsics = scaled_intrinsics(rgb_meta, image_size)
     camera_forward = pose[:3, 2]
     camera_pitch_deg = math.degrees(
         math.asin(float(np.clip(camera_forward[1], -1.0, 1.0)))
@@ -201,6 +346,39 @@ def predictions_to_world(
             continue
         center_unity_camera = basis @ center_camera
         rotation_unity_camera = basis @ rotation_camera @ basis.T
+        localization: Optional[DepthLocalization] = None
+        if aligned_depth_mm is not None:
+            assert intrinsics is not None
+            fx, fy, cx, cy = intrinsics
+            localization = localize_detection_from_depth(
+                detections[index], aligned_depth_mm
+            )
+            # Spatial mapping is deliberately strict.  The regular single-view
+            # endpoint can still use a CuTR-only box, but an RGB-D mapping
+            # session must not create a box at an unmeasured position.
+            if localization is None:
+                continue
+            point_model_camera = np.asarray(
+                [
+                    (localization.pixel_x - cx) * localization.depth_m / fx,
+                    (localization.pixel_y - cy) * localization.depth_m / fy,
+                    localization.depth_m,
+                ],
+                dtype=np.float64,
+            )
+            surface_unity_camera = basis @ point_model_camera
+            view_ray = surface_unity_camera / max(
+                1e-8, float(np.linalg.norm(surface_unity_camera))
+            )
+            # The depth point lies on the visible face.  Move it into the OBB
+            # by the support distance in the viewing direction to obtain its
+            # centre, rather than trusting CuTR's absolute translation.
+            half_support = float(
+                np.sum(
+                    np.abs(rotation_unity_camera.T @ view_ray) * dims / 2.0
+                )
+            )
+            center_unity_camera = surface_unity_camera + view_ray * half_support
         center_world = pose[:3, :3] @ center_unity_camera + pose[:3, 3]
         rotation_world = pose[:3, :3] @ rotation_unity_camera
         u, _, vt = np.linalg.svd(rotation_world)
@@ -217,6 +395,16 @@ def predictions_to_world(
                 camera_pitch_deg=camera_pitch_deg,
                 raw_tilt_deg=_vertical_tilt_deg(rotation_world),
                 final_tilt_deg=_vertical_tilt_deg(rotation_world),
+                localization_mode="metric_depth" if localization else "model_3d",
+                depth_sample_count=localization.sample_count if localization else 0,
+                depth_coverage_ratio=(
+                    localization.coverage_ratio if localization else 0.0
+                ),
+                depth_iqr_m=localization.iqr_m if localization else 0.0,
+                localization_confidence=(
+                    localization.confidence if localization else 0.0
+                ),
+                localization_accepted_frames=[frame_id] if localization else [],
             )
         )
     return observations
@@ -242,7 +430,37 @@ def _observation_weight(observation: Observation) -> float:
     # A close, high-confidence observation should count more, without allowing
     # an extreme close-up to completely dominate the remaining views.
     area = float(np.clip(observation.bbox_area_ratio, 1e-4, 0.50))
-    return max(0.01, observation.score) * math.sqrt(area)
+    localization = (
+        max(0.20, observation.localization_confidence)
+        if observation.localization_mode == "metric_depth"
+        else 0.20
+    )
+    return max(0.01, observation.score) * math.sqrt(area) * localization
+
+
+def _robust_center(
+    observations: List[Observation], weights: np.ndarray
+) -> Tuple[np.ndarray, List[int], float]:
+    """Fuse metric OBB centres while rejecting a spatially inconsistent view."""
+    points = np.asarray([item.center for item in observations], dtype=np.float64)
+    median = np.median(points, axis=0)
+    distances = np.linalg.norm(points - median, axis=1)
+    typical_size = float(np.median([item.diagonal for item in observations]))
+    threshold = max(0.35, 0.30 * typical_size)
+    accepted = [index for index, distance in enumerate(distances) if distance <= threshold]
+    if not accepted:
+        accepted = [int(np.argmin(distances))]
+    accepted_weights = weights[accepted]
+    centre = np.average(points[accepted], axis=0, weights=accepted_weights)
+    dispersion = float(
+        math.sqrt(
+            np.average(
+                np.square(np.linalg.norm(points[accepted] - centre, axis=1)),
+                weights=accepted_weights,
+            )
+        )
+    )
+    return centre, accepted, dispersion
 
 
 def _upright_geometry(observation: Observation) -> Tuple[np.ndarray, np.ndarray]:
@@ -417,11 +635,12 @@ def _fuse_upright(
     )
 
     accepted_observations = [observations[index] for index in accepted]
-    center, dims = _refit_geometry(
+    _, dims = _refit_geometry(
         accepted_observations,
         accepted_weights,
         final_rotation,
     )
+    center, _, _ = _robust_center(accepted_observations, accepted_weights)
     differences = np.asarray(
         [_line_angle_difference_deg(angle, yaw) for angle in accepted_angles]
     )
@@ -485,11 +704,12 @@ def _fuse_free_3d(
                 image_size=item.image_size,
             )
         )
-    center, dims = _refit_geometry(
+    _, dims = _refit_geometry(
         normalized_observations,
         accepted_weights,
         final_rotation,
     )
+    center, _, _ = _robust_center(normalized_observations, accepted_weights)
     differences = np.asarray(
         [
             _rotation_angle_deg(aligned[index][0], final_rotation)
@@ -543,6 +763,17 @@ class Cluster:
                 raw_tilt_deg=_vertical_tilt_deg(representative.rotation),
                 final_tilt_deg=_vertical_tilt_deg(representative.rotation),
                 orientation_accepted_frames=[representative.frame_id],
+                localization_mode=representative.localization_mode,
+                depth_sample_count=representative.depth_sample_count,
+                depth_coverage_ratio=representative.depth_coverage_ratio,
+                depth_iqr_m=representative.depth_iqr_m,
+                localization_confidence=representative.localization_confidence,
+                localization_accepted_frames=list(
+                    representative.localization_accepted_frames
+                ),
+                localization_rejected_frames=list(
+                    representative.localization_rejected_frames
+                ),
             )
 
         upright_count = sum(
@@ -577,6 +808,16 @@ class Cluster:
             key=lambda item: (item.score, item.bbox_area_ratio),
         )
         raw_weights = np.asarray([_observation_weight(item) for item in accepted])
+        center, localization_indices, localization_dispersion = _robust_center(
+            accepted, raw_weights
+        )
+        localization_accepted = [accepted[index] for index in localization_indices]
+        localization_accepted_ids = {
+            item.frame_id for item in localization_accepted
+        }
+        localization_weights = np.asarray(
+            [_observation_weight(item) for item in localization_accepted]
+        )
         raw_tilt = float(
             np.average(
                 [_vertical_tilt_deg(item.rotation) for item in accepted],
@@ -604,6 +845,47 @@ class Cluster:
                 item.frame_id
                 for item in self.observations
                 if item.frame_id not in accepted_frame_ids
+            ],
+            localization_mode=(
+                "metric_depth"
+                if all(item.localization_mode == "metric_depth" for item in localization_accepted)
+                else "model_3d"
+            ),
+            depth_sample_count=int(
+                round(
+                    np.average(
+                        [item.depth_sample_count for item in localization_accepted],
+                        weights=localization_weights,
+                    )
+                )
+            ),
+            depth_coverage_ratio=float(
+                np.average(
+                    [item.depth_coverage_ratio for item in localization_accepted],
+                    weights=localization_weights,
+                )
+            ),
+            depth_iqr_m=max(
+                [item.depth_iqr_m for item in localization_accepted], default=0.0
+            ),
+            localization_confidence=float(
+                np.clip(
+                    np.average(
+                        [item.localization_confidence for item in localization_accepted],
+                        weights=localization_weights,
+                    )
+                    * max(0.0, 1.0 - localization_dispersion / 0.35),
+                    0.0,
+                    1.0,
+                )
+            ),
+            localization_accepted_frames=[
+                item.frame_id for item in localization_accepted
+            ],
+            localization_rejected_frames=[
+                item.frame_id
+                for item in accepted
+                if item.frame_id not in localization_accepted_ids
             ],
         )
 
@@ -698,6 +980,19 @@ def build_fused_prediction(
         )
         detection["orientation_rejected_frames"] = list(
             fused.orientation_rejected_frames
+        )
+        detection["localization_mode"] = fused.localization_mode
+        detection["depth_sample_count"] = fused.depth_sample_count
+        detection["depth_coverage_ratio"] = round(fused.depth_coverage_ratio, 4)
+        detection["depth_iqr_m"] = round(fused.depth_iqr_m, 4)
+        detection["localization_confidence"] = round(
+            fused.localization_confidence, 4
+        )
+        detection["localization_accepted_frames"] = list(
+            fused.localization_accepted_frames
+        )
+        detection["localization_rejected_frames"] = list(
+            fused.localization_rejected_frames
         )
         detections.append(detection)
         centers.append(fused.center.astype(float).tolist())
