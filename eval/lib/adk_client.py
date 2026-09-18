@@ -46,9 +46,13 @@ def parse_events(events: List[Dict[str, Any]]) -> Dict[str, Any]:
         role = content.get("role", "")
 
         for part in parts:
-            # Final text reply from the model
+            # Final text reply from the model (skip Gemini thinking parts)
             if role == "model" and "text" in part and part["text"].strip():
+                if part.get("thought"):
+                    continue
                 candidate = part["text"].strip()
+                if candidate.startswith("{thought}"):
+                    candidate = candidate[len("{thought}"):].strip()
                 if not any(k in part for k in ("functionCall", "functionResponse")):
                     assistant_answer = candidate
 
