@@ -184,6 +184,13 @@ def _persist_status(job_id: str, status: str, error: Optional[str] = None, **ext
     (d / "status.json").write_text(json.dumps(payload, indent=2))
 
 
+def _write_metrics(path: Path, metrics: Dict[str, Any]) -> None:
+    path.write_text(
+        "".join(f"{key}={value}\n" for key, value in metrics.items()),
+        encoding="utf-8",
+    )
+
+
 # API models
 class CutrRunRequest(BaseModel):
     image_base64: str = Field(..., description="PNG/JPEG image, base64-encoded.")
@@ -303,6 +310,7 @@ def _run_multiview_job(job_id: str, req: MultiFinalizeRequest) -> None:
 
     job_dir = _job_dir(job_id)
     log_path = job_dir / "run.log"
+    map_started = time.perf_counter()
     try:
         _job_set(job_id, status=JOB_RUNNING, error=None, processed_frames=0)
         frame_dirs = _frame_dirs(job_dir)
@@ -345,6 +353,9 @@ def _run_multiview_job(job_id: str, req: MultiFinalizeRequest) -> None:
         max_edge = None if int(req.max_edge or 0) <= 0 else int(req.max_edge)
         observations_by_frame: Dict[str, Any] = {}
         total_inference_time = 0.0
+        frame_inference_times: List[float] = []
+        transform_time = 0.0
+        raw_detections = 0
 
         for processed, frame in enumerate(selected_frames, start=1):
             image = frame["image"]
@@ -360,12 +371,16 @@ def _run_multiview_job(job_id: str, req: MultiFinalizeRequest) -> None:
                 score_thresh=float(req.score_thresh),
                 max_edge=max_edge,
             )
-            total_inference_time += time.perf_counter() - started
+            frame_time = time.perf_counter() - started
+            frame_inference_times.append(frame_time)
+            total_inference_time += frame_time
+            raw_detections += len(pred.get("detections") or [])
             mods["save_pred_json"](
                 pred,
                 image_path=frame["image_path"],
                 out_path=frame["dir"] / "pred.json",
             )
+            transform_started = time.perf_counter()
             observations_by_frame[frame["id"]] = predictions_to_world(
                 frame["id"],
                 pred,
@@ -373,6 +388,7 @@ def _run_multiview_job(job_id: str, req: MultiFinalizeRequest) -> None:
                 image.size,
                 os.environ.get("CUTR_TO_UNITY_BASIS"),
             )
+            transform_time += time.perf_counter() - transform_started
             _job_set(job_id, processed_frames=processed)
             _persist_status(
                 job_id,
@@ -381,14 +397,18 @@ def _run_multiview_job(job_id: str, req: MultiFinalizeRequest) -> None:
                 processed_frames=processed,
             )
 
+        fusion_started = time.perf_counter()
         clusters = fuse_observations(observations_by_frame)
         fused_pred, representatives = build_fused_prediction(clusters, inference_mode)
+        fusion_deduplication_time = transform_time + time.perf_counter() - fusion_started
+        total_map_time = time.perf_counter() - map_started
         pred_path = job_dir / "pred.json"
         pred_path.write_text(json.dumps(fused_pred, indent=2), encoding="utf-8")
 
         representatives_dir = job_dir / "representatives"
         representatives_dir.mkdir(exist_ok=True)
         frames_by_id = {frame["id"]: frame for frame in frames}
+        crop_started = time.perf_counter()
         for index, observation in enumerate(representatives):
             source = frames_by_id[observation.frame_id]["image"]
             crop = crop_for_detection(source, observation.detection)
@@ -398,6 +418,34 @@ def _run_multiview_job(job_id: str, req: MultiFinalizeRequest) -> None:
                     format="JPEG",
                     quality=90,
                 )
+        crop_generation_time = time.perf_counter() - crop_started
+
+        num_fused_objects = len(clusters)
+        mean_observations = (
+            sum(len(cluster.observations) for cluster in clusters) / num_fused_objects
+            if num_fused_objects else 0.0
+        )
+        mean_frame_time = (
+            sum(frame_inference_times) / len(frame_inference_times)
+            if frame_inference_times else 0.0
+        )
+        variance = (
+            sum((value - mean_frame_time) ** 2 for value in frame_inference_times)
+            / len(frame_inference_times)
+            if frame_inference_times else 0.0
+        )
+        _write_metrics(job_dir / "metrics.txt", {
+            "num_frames": len(selected_frames),
+            "num_raw_detections": raw_detections,
+            "num_fused_objects": num_fused_objects,
+            "mean_observations_per_fused_object": round(mean_observations, 4),
+            "cutr_inference_time_per_frame_s": round(mean_frame_time, 4),
+            "cutr_inference_time_per_frame_std_s": round(math.sqrt(variance), 4),
+            "cutr_inference_time_total_s": round(total_inference_time, 4),
+            "fusion_deduplication_time_s": round(fusion_deduplication_time, 4),
+            "total_map_construction_time_s": round(total_map_time, 4),
+            "crop_generation_time_s": round(crop_generation_time, 4),
+        })
 
         manifest = {
             "job_id": job_id,
@@ -462,7 +510,7 @@ def _run_multiview_job(job_id: str, req: MultiFinalizeRequest) -> None:
 
         zip_path = job_dir / f"{job_id}.zip"
         with zipfile.ZipFile(zip_path, "w", compression=zipfile.ZIP_DEFLATED) as archive:
-            for path in (pred_path, job_dir / "manifest.json", log_path):
+            for path in (pred_path, job_dir / "manifest.json", log_path, job_dir / "metrics.txt"):
                 archive.write(path, arcname=path.name)
             for path in sorted(representatives_dir.glob("*.jpg")):
                 archive.write(path, arcname=f"representatives/{path.name}")

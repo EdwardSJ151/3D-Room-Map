@@ -143,6 +143,11 @@ def _persist_vs(job_id: str, st: Dict[str, Any]):
     (d / "vectorstore.json").write_text(json.dumps(st, indent=2))
 
 
+def _append_metric(job_id: str, name: str, value: Any) -> None:
+    with open(_job_dir(job_id) / "metrics.txt", "a", encoding="utf-8") as f:
+        f.write(f"{name}={value}\n")
+
+
 # ----------------------------
 # Helpers
 # ----------------------------
@@ -271,6 +276,8 @@ def _build_vectorstore(job_id: str, items: List[Dict[str, Any]], timing: Optiona
         combined_timing = dict(timing or {})
         combined_timing["embedding_indexing_time_s"] = round(embedding_indexing_time_s, 4)
         (d / "timing.json").write_text(json.dumps(combined_timing, indent=2))
+        _append_metric(job_id, "embedding_indexing_time_s", round(embedding_indexing_time_s, 4))
+        _append_metric(job_id, "num_indexed_objects", len(metadata))
 
         _vs_set(job_id, status=VS_DONE, n=len(metadata), error=None)
     except Exception as e:
@@ -447,6 +454,8 @@ async def run_qwen(req: QwenRunRequest):
         "crop_generation_time_s": round(crop_generation_time_s, 4),
         "qwen_labeling_time_s": round(qwen_labeling_time_s, 4),
     }
+    _append_metric(job_id, "crop_generation_time_s", timing["crop_generation_time_s"])
+    _append_metric(job_id, "qwen_labeling_time_s", timing["qwen_labeling_time_s"])
 
     # Kick off vectorstore build in background.
     _vs_set(job_id, status=VS_PENDING, error=None)
@@ -469,6 +478,7 @@ def vectorstore_status(job_id: str):
 
 @app.post("/qwen/query", response_model=QueryResponse)
 def query(req: QueryRequest):
+    retrieval_started = time.perf_counter()
     st = _vs_get(req.job_id)
     if not st:
         raise HTTPException(status_code=404, detail="Job not found")
@@ -494,6 +504,11 @@ def query(req: QueryRequest):
             tags=list(m.get("tags") or []),
             score=float(score),
         ))
+    _append_metric(
+        req.job_id,
+        "query_retrieval_time_s",
+        round(time.perf_counter() - retrieval_started, 4),
+    )
     return QueryResponse(job_id=req.job_id, query=req.query, results=hits)
 
 
